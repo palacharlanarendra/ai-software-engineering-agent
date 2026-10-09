@@ -46,7 +46,7 @@ def search_code(query: str) -> list[dict]:
     root = PROJECT_ROOT.resolve()
 
     ignored_dirs = {
-        ".git", "my-ai-env", "__pycache__", "node_modules"
+        ".git", "my-ai-env", "__pycache__", ".env"
     }
 
     for path in root.rglob("*"):
