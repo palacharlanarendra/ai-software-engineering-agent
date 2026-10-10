@@ -1,125 +1,88 @@
-# import os
+import logging
+import uuid
+from typing import Optional
 
-# from dotenv import load_dotenv
+from app.agent.graph import build_agent_graph
+from app.agent.state import AgentState
 
-# from langchain_google_genai import ChatGoogleGenerativeAI
+logger = logging.getLogger(__name__)
 
-# from app.agent.tools import (
-#     list_repository_files,
-#     read_repository_file,
-#     search_repository,
-#     semantic_repository_search,
-# )
-
-# load_dotenv()
+# Primary compiled LangGraph workflow instance
+agent_graph = build_agent_graph()
 
 
-# llm = ChatGoogleGenerativeAI(
-#     model="gemini-2.5-flash",
-#     google_api_key=os.getenv("GEMINI_API_KEY"),
-#     temperature=0,
-# )
+def run_agent_workflow(
+    task: str,
+    thread_id: Optional[str] = None,
+    auto_approve: bool = False,
+) -> AgentState:
+    """
+    Execute the Software Engineering Agent workflow.
+
+    Args:
+        task: Natural language coding task.
+        thread_id: Unique session identifier for checkpointer state persistence.
+        auto_approve: If True, automatically approves proposed patch without pausing.
+
+    Returns:
+        AgentState at the current workflow checkpoint (either paused at approval or finished).
+    """
+    session_id = thread_id or f"session-{uuid.uuid4().hex[:8]}"
+    config = {"configurable": {"thread_id": session_id}}
+
+    # Initial graph execution up to approval boundary
+    state: AgentState = agent_graph.invoke({"task": task}, config=config)
+
+    # If auto-approval is enabled and graph is awaiting approval, approve and resume
+    if auto_approve and state.get("status") == "awaiting_approval":
+        agent_graph.update_state(config, {"approval_status": "approved"})
+        state = agent_graph.invoke(None, config=config)
+
+    return state
 
 
-# tools = [
-#     list_repository_files,
-#     read_repository_file,
-#     search_repository,
-#     semantic_repository_search,
-# ]
+def approve_and_resume_workflow(
+    thread_id: str,
+    approved: bool = True,
+    human_feedback: Optional[str] = None,
+) -> AgentState:
+    """
+    Resume an agent workflow that is halted at the human approval boundary.
+
+    Args:
+        thread_id: Active session identifier.
+        approved: True to apply patch and verify; False to reject and abort.
+        human_feedback: Optional feedback explaining rejection or instructions.
+
+    Returns:
+        Final AgentState after executing post-approval stages.
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+    status_str = "approved" if approved else "rejected"
+
+    update_payload = {"approval_status": status_str}
+    if human_feedback:
+        update_payload["human_feedback"] = human_feedback
+
+    agent_graph.update_state(config, update_payload)
+    return agent_graph.invoke(None, config=config)
 
 
-# llm_with_tools = llm.bind_tools(tools)
+def run_agent(question: str) -> str:
+    """
+    Legacy convenience interface returning a summary answer string.
+    """
+    state = run_agent_workflow(question, auto_approve=False)
+    analysis = state.get("analysis")
+    if analysis and "summary" in analysis:
+        return analysis["summary"]
+    return state.get("status", "completed")
 
-
-# response = llm_with_tools.invoke(
-#     "Where is the chunking function implemented?"
-# )
-
-# print(response)
-
-# agent loop below - langchain
-
-import os
-
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, ToolMessage
-
-from app.agent.tools import (
-    list_repository_files,
-    read_repository_file,
-    search_repository,
-    semantic_repository_search,
-)
-
-load_dotenv()
-
-
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=os.getenv("GEMINI_API_KEY"),
-    temperature=0,
-)
-
-
-tools = [
-    list_repository_files,
-    read_repository_file,
-    search_repository,
-    semantic_repository_search,
-]
-
-llm_with_tools = llm.bind_tools(tools)
-
-
-tool_map = {
-    tool.name: tool
-    for tool in tools
-}
-
-
-def run_agent(question: str):
-
-    messages = [
-        HumanMessage(content=question)
-    ]
-
-    for _ in range(5):
-
-        response = llm_with_tools.invoke(messages)
-
-        messages.append(response)
-
-        # No tool call = final answer
-        if not response.tool_calls:
-            return response.content
-
-        # Execute requested tools
-        for tool_call in response.tool_calls:
-
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_call_id = tool_call["id"]
-
-            tool = tool_map[tool_name]
-
-            result = tool.invoke(tool_args)
-
-            messages.append(
-                ToolMessage(
-                    content=str(result),
-                    tool_call_id=tool_call_id,
-                )
-            )
-
-    return "Agent reached the maximum number of iterations."
 
 if __name__ == "__main__":
-
-    answer = run_agent(
-        "Where is the chunking function implemented?"
-    )
-
-    print("\nFINAL ANSWER:\n")
-    print(answer)
+    task_example = "Where is repository path traversal handled?"
+    print(f"Running task: {task_example}")
+    result_state = run_agent_workflow(task_example)
+    print("\nWorkflow status:", result_state.get("status"))
+    if result_state.get("analysis"):
+        print("Diagnosis Summary:\n", result_state["analysis"].get("summary"))
