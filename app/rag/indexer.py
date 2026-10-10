@@ -2,7 +2,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+)
 
 from app.config import (
     PROJECT_ROOT,
@@ -22,17 +27,25 @@ def get_qdrant_client() -> QdrantClient:
 
 def index_file(file_path: Path, client: QdrantClient | None = None) -> int:
     qdrant = client or get_qdrant_client()
+    
     relative_path = file_path.relative_to(PROJECT_ROOT).as_posix()
 
-    content = file_path.read_text(
-        encoding="utf-8",
-        errors="ignore",
+    # Delete previously indexed chunks for this file only.
+    qdrant.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=Filter(
+            must=[
+                FieldCondition(
+                    key="file_path",
+                    match=MatchValue(value=relative_path),
+                )
+            ]
+        ),
+        wait=True,
     )
 
-    chunks = chunk_code(
-        content,
-        relative_path,
-    )
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
+    chunks = chunk_code(content, relative_path)
 
     points = []
 
