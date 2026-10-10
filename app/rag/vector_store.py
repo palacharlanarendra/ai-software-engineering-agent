@@ -1,7 +1,7 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
-from app.config import QDRANT_URL, QDRANT_COLLECTION
+from app.config import QDRANT_URL, QDRANT_COLLECTION, EMBEDDING_DIMENSION
 
 COLLECTION_NAME = QDRANT_COLLECTION
 
@@ -13,7 +13,7 @@ def get_qdrant_client(url: str | None = None) -> QdrantClient:
 def ensure_collection(
     client: QdrantClient | None = None,
     collection_name: str = COLLECTION_NAME,
-    vector_size: int = 3072,
+    vector_size: int = EMBEDDING_DIMENSION,
 ) -> bool:
     """Ensure the specified Qdrant collection exists without failing on re-initialization."""
     qdrant = client or get_qdrant_client()

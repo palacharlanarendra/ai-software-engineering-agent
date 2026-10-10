@@ -24,9 +24,11 @@ def semantic_repository_search(query: str) -> list[dict]:
 
     return [
         {
-            "file": result.payload["file_path"],
-            "chunk": result.payload["chunk_index"],
-            "content": result.payload["content"],
+            "file": result.file_path,
+            "chunk": result.chunk_index,
+            "start_line": result.start_line,
+            "end_line": result.end_line,
+            "content": result.content,
             "score": result.score,
         }
         for result in results
