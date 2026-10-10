@@ -2,7 +2,14 @@ import logging
 from typing import Any, Dict
 
 from app.agent.state import AgentState, PatchProposal
-from app.agent.patch import create_unified_diff, validate_patch_syntax, apply_patch_safely
+from app.agent.patch import (
+    create_unified_diff,
+    validate_patch_syntax,
+    apply_patch_safely,
+    validate_target_path,
+    create_patch_id,
+    compute_content_checksum,
+)
 from app.agent.verifier import run_verification_tests
 from app.ai.analyzer import analyze_code_task
 from app.rag.retriever import search_code_semantic
@@ -115,12 +122,11 @@ def analyze_evidence_node(state: AgentState) -> Dict[str, Any]:
 
 
 def propose_patch_node(state: AgentState) -> Dict[str, Any]:
-    """Generate structured patch proposal with unified diff and syntax checks."""
+    """Generate structured patch proposal with unified diff, unique patch ID, and checksums."""
     analysis = state.get("analysis") or {}
     proposed_changes = analysis.get("proposed_changes", [])
 
     if not proposed_changes:
-        # Diagnosis concluded no code modifications required
         return {
             "patch": None,
             "approval_status": "not_needed",
@@ -132,12 +138,22 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
     description = first_change.get("description", "")
     proposed_code = first_change.get("code_snippet", "")
 
+    # Validate target file path against security rules
+    is_valid_path, _, path_err = validate_target_path(target_file)
+    errors = list(state.get("errors", []))
+    if not is_valid_path:
+        errors.append(path_err or f"Invalid target path: {target_file}")
+        return {
+            "patch": None,
+            "status": "failed",
+            "errors": errors,
+        }
+
     # Read original file content
     orig_content = read_file(target_file)
     if orig_content.startswith("file not found:") or orig_content.startswith("Access denied."):
         orig_content = ""
 
-    # If proposed_code is empty, synthesize a minimal patch description
     proposed_content = proposed_code if proposed_code else orig_content
 
     # Generate unified diff
@@ -145,16 +161,23 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
 
     # Validate syntax if python file
     syntax_err = validate_patch_syntax(proposed_content, target_file)
-    errors = list(state.get("errors", []))
     if syntax_err:
         errors.append(syntax_err)
 
+    # Generate deterministic patch ID and checksums
+    patch_id = create_patch_id(target_file, proposed_content)
+    orig_checksum = compute_content_checksum(orig_content)
+    prop_checksum = compute_content_checksum(proposed_content)
+
     patch_proposal: PatchProposal = {
+        "patch_id": patch_id,
         "file_path": target_file,
         "description": description,
         "diff": diff,
         "original_content": orig_content,
         "proposed_content": proposed_content,
+        "expected_original_checksum": orig_checksum,
+        "proposed_checksum": prop_checksum,
     }
 
     return {
@@ -166,7 +189,7 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
 
 
 def apply_patch_node(state: AgentState) -> Dict[str, Any]:
-    """Apply approved patch to disk only after explicit human approval."""
+    """Apply approved patch to disk only after explicit human approval tied to the exact patch."""
     approval = state.get("approval_status", "")
     patch = state.get("patch")
 
@@ -183,7 +206,23 @@ def apply_patch_node(state: AgentState) -> Dict[str, Any]:
             "patch_applied": False,
         }
 
-    success, orig, err = apply_patch_safely(patch["file_path"], patch["proposed_content"])
+    # Verify approval was tied to this exact patch ID if specified
+    approved_id = state.get("approved_patch_id")
+    if approved_id and approved_id != patch.get("patch_id"):
+        return {
+            "status": "rejected",
+            "patch_applied": False,
+            "errors": state.get("errors", []) + [
+                f"Patch mismatch: approved ID '{approved_id}' does not match active patch '{patch.get('patch_id')}'."
+            ],
+        }
+
+    # Revalidate and apply with original checksum conflict verification
+    success, orig, err = apply_patch_safely(
+        file_path=patch["file_path"],
+        proposed_content=patch["proposed_content"],
+        expected_original_checksum=patch.get("expected_original_checksum"),
+    )
     if not success:
         return {
             "status": "apply_failed",

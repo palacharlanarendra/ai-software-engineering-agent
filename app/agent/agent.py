@@ -44,6 +44,7 @@ def run_agent_workflow(
 def approve_and_resume_workflow(
     thread_id: str,
     approved: bool = True,
+    patch_id: Optional[str] = None,
     human_feedback: Optional[str] = None,
 ) -> AgentState:
     """
@@ -52,6 +53,7 @@ def approve_and_resume_workflow(
     Args:
         thread_id: Active session identifier.
         approved: True to apply patch and verify; False to reject and abort.
+        patch_id: Optional exact patch ID tied to the approval.
         human_feedback: Optional feedback explaining rejection or instructions.
 
     Returns:
@@ -61,6 +63,8 @@ def approve_and_resume_workflow(
     status_str = "approved" if approved else "rejected"
 
     update_payload = {"approval_status": status_str}
+    if patch_id:
+        update_payload["approved_patch_id"] = patch_id
     if human_feedback:
         update_payload["human_feedback"] = human_feedback
 

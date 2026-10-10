@@ -6,6 +6,36 @@ from app.agent.state import VerificationResult
 from app.config import PROJECT_ROOT
 
 
+def validate_test_target(target: str) -> tuple[bool, Optional[str]]:
+    """
+    Strictly validate that the test target is a safe relative test path inside app/tests,
+    preventing arbitrary pytest flags, absolute paths, or directory traversal.
+    """
+    if not target or not target.strip():
+        return False, "Test target cannot be empty."
+
+    clean_target = target.strip()
+    if clean_target.startswith("-"):
+        return False, f"Access denied: CLI flags are not permitted in test target ('{clean_target}')."
+
+    if clean_target.startswith("/") or clean_target.startswith("\\"):
+        return False, f"Access denied: Absolute paths are not permitted in test target ('{clean_target}')."
+
+    root = PROJECT_ROOT.resolve()
+    # Support target expressions like app/tests/test_repository.py::TestClass::test_func
+    base_file_path = clean_target.split("::")[0]
+    resolved_path = (root / base_file_path).resolve()
+
+    if root not in resolved_path.parents and resolved_path != root:
+        return False, f"Access denied: Test target escapes repository root ('{clean_target}')."
+
+    tests_root = (root / "app" / "tests").resolve()
+    if tests_root not in resolved_path.parents and resolved_path != tests_root:
+        return False, f"Access denied: Test target must reside inside 'app/tests' ('{clean_target}')."
+
+    return True, None
+
+
 def run_verification_tests(
     test_target: Optional[str] = None,
     timeout: int = 45,
@@ -22,6 +52,17 @@ def run_verification_tests(
         VerificationResult with passed status, exit code, and captured output.
     """
     target = test_target or "app/tests/"
+
+    # Validate target safety
+    is_valid, err = validate_test_target(target)
+    if not is_valid:
+        return VerificationResult(
+            passed=False,
+            exit_code=-1,
+            output=f"Security error: {err}",
+            test_target=target,
+        )
+
     command = [
         sys.executable,
         "-m",

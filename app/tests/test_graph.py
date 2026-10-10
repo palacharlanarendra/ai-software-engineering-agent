@@ -4,7 +4,14 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent.state import AgentState, PatchProposal, VerificationResult
-from app.agent.patch import create_unified_diff, validate_patch_syntax, apply_patch_safely, rollback_patch
+from app.agent.patch import (
+    create_unified_diff,
+    validate_patch_syntax,
+    apply_patch_safely,
+    rollback_patch,
+    compute_content_checksum,
+    create_patch_id,
+)
 from app.agent.nodes import (
     validate_input_node,
     retrieve_context_node,
@@ -22,6 +29,9 @@ from app.agent.graph import (
     route_after_apply,
     route_after_verify,
 )
+
+
+from app.agent.verifier import run_verification_tests, validate_test_target
 
 
 # ==============================================================================
@@ -54,11 +64,44 @@ class TestPatchUtilities:
         assert not success
         assert "escapes repository root" in err
 
+    def test_apply_patch_safely_rejects_absolute_paths(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        success, orig, err = apply_patch_safely("/etc/passwd", "root:x:0:0\n")
+        assert not success
+        assert "absolute path" in err
+
+    def test_apply_patch_safely_rejects_unpermitted_extensions(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        success, orig, err = apply_patch_safely("payload.exe", "MZ\x90\x00")
+        assert not success
+        assert "not permitted for editing" in err
+
     def test_apply_patch_safely_prevents_touching_sensitive_files(self, tmp_path, monkeypatch):
         monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
         success, orig, err = apply_patch_safely(".env", "SECRET=exposed\n")
         assert not success
         assert "sensitive file" in err
+
+    def test_apply_patch_safely_conflict_detection_when_file_changed_concurrently(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        target = tmp_path / "module.py"
+        target.write_text("v = 1\n", encoding="utf-8")
+
+        initial_checksum = compute_content_checksum("v = 1\n")
+
+        # Simulate concurrent edit to the file on disk while approval was pending
+        target.write_text("v = 99\n", encoding="utf-8")
+
+        # Attempt to apply patch expecting original checksum
+        success, orig, err = apply_patch_safely(
+            "module.py",
+            "v = 2\n",
+            expected_original_checksum=initial_checksum,
+        )
+        assert not success
+        assert "Conflict detected" in err
+        # Ensure file was not overwritten
+        assert target.read_text(encoding="utf-8") == "v = 99\n"
 
     def test_apply_and_rollback_patch(self, tmp_path, monkeypatch):
         monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
@@ -73,6 +116,57 @@ class TestPatchUtilities:
         rb_success, rb_err = rollback_patch("hello.py", orig)
         assert rb_success
         assert target.read_text(encoding="utf-8") == "initial = True\n"
+
+
+# ==============================================================================
+# Verifier Security Unit Tests
+# ==============================================================================
+
+
+class TestVerifierSecurity:
+    def test_validate_test_target_rejects_empty(self):
+        valid, err = validate_test_target("   ")
+        assert not valid
+        assert "cannot be empty" in err
+
+    def test_validate_test_target_rejects_cli_flags(self):
+        valid, err = validate_test_target("-k test_foo")
+        assert not valid
+        assert "CLI flags are not permitted" in err
+
+        valid, err = validate_test_target("--collect-only")
+        assert not valid
+        assert "CLI flags are not permitted" in err
+
+    def test_validate_test_target_rejects_absolute_paths(self):
+        valid, err = validate_test_target("/etc/passwd")
+        assert not valid
+        assert "Absolute paths are not permitted" in err
+
+    def test_validate_test_target_rejects_path_traversal(self):
+        valid, err = validate_test_target("../../outside.py")
+        assert not valid
+        assert "escapes repository root" in err
+
+    def test_validate_test_target_rejects_files_outside_app_tests(self):
+        valid, err = validate_test_target("app/main.py")
+        assert not valid
+        assert "must reside inside 'app/tests'" in err
+
+    def test_validate_test_target_accepts_valid_test_paths(self):
+        valid, err = validate_test_target("app/tests/test_repository.py")
+        assert valid
+        assert err is None
+
+        valid, err = validate_test_target("app/tests/test_repository.py::TestClass::test_func")
+        assert valid
+        assert err is None
+
+    def test_run_verification_tests_aborts_on_unsafe_target(self):
+        res = run_verification_tests(test_target="-o custom_option=malicious")
+        assert not res["passed"]
+        assert res["exit_code"] == -1
+        assert "Security error" in res["output"]
 
 
 # ==============================================================================
@@ -168,6 +262,46 @@ class TestGraphNodes:
         state = {
             "approval_status": "approved",
             "patch": {"file_path": "calc.py", "proposed_content": "val = 20\n"},
+        }
+        res = apply_patch_node(state)
+        assert res["status"] == "applied"
+        assert res["patch_applied"]
+        assert target.read_text(encoding="utf-8") == "val = 20\n"
+
+    def test_apply_patch_node_rejects_when_approved_patch_id_mismatch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        target = tmp_path / "calc.py"
+        target.write_text("val = 10\n", encoding="utf-8")
+
+        state = {
+            "approval_status": "approved",
+            "approved_patch_id": "patch-different-id",
+            "patch": {
+                "patch_id": "patch-actual-id",
+                "file_path": "calc.py",
+                "proposed_content": "val = 20\n",
+            },
+        }
+        res = apply_patch_node(state)
+        assert res["status"] == "rejected"
+        assert not res["patch_applied"]
+        assert "Patch mismatch" in res["errors"][0]
+        # Target file must remain untouched
+        assert target.read_text(encoding="utf-8") == "val = 10\n"
+
+    def test_apply_patch_node_accepts_when_approved_patch_id_matches(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        target = tmp_path / "calc.py"
+        target.write_text("val = 10\n", encoding="utf-8")
+
+        state = {
+            "approval_status": "approved",
+            "approved_patch_id": "patch-123456",
+            "patch": {
+                "patch_id": "patch-123456",
+                "file_path": "calc.py",
+                "proposed_content": "val = 20\n",
+            },
         }
         res = apply_patch_node(state)
         assert res["status"] == "applied"

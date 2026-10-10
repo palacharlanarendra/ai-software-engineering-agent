@@ -29,6 +29,7 @@ class TaskRequest(BaseModel):
 
 class ApprovalRequest(BaseModel):
     approved: bool = Field(description="True to approve and apply the patch; False to reject")
+    patch_id: Optional[str] = Field(default=None, description="Exact patch ID being approved to prevent mismatched changes")
     human_feedback: Optional[str] = Field(default=None, description="Optional feedback regarding the decision")
 
 
@@ -97,6 +98,7 @@ def submit_approval(thread_id: str, request: ApprovalRequest):
     final_state = approve_and_resume_workflow(
         thread_id=thread_id,
         approved=request.approved,
+        patch_id=request.patch_id,
         human_feedback=request.human_feedback,
     )
 

@@ -74,10 +74,10 @@ The agent investigates coding tasks using semantic repository search and retriev
 │   │   └── vector_store.py   # Qdrant client factory and collection initialization
 │   ├── tools/                # Repository Filesystem Tools
 │   │   └── repository.py     # list_files, read_file (path-safe), search_code (case-insensitive)
-│   └── tests/                # Automated Pytest Suite (81 passing tests)
+│   └── tests/                # Automated Pytest Suite (95 passing tests)
 │       ├── test_ai_layer.py  # Mocked unit tests for LLM & analyzer
-│       ├── test_api.py       # FastAPI endpoint tests
-│       ├── test_graph.py     # LangGraph routing, interrupt & resume tests
+│       ├── test_api.py       # FastAPI endpoint tests (task lifecycle & approval)
+│       ├── test_graph.py     # LangGraph routing, patch safety, verifier bounds & interrupts
 │       ├── test_rag.py       # Chunking, indexing, and retrieval tests
 │       └── test_repository.py# Traversal bounds, search, and list tests
 ├── scripts/                  # CLI & Helper Scripts
@@ -152,3 +152,30 @@ uvicorn app.main:app --reload --port 8000
 - `POST /task`: Starts a full engineering task workflow. Halts at the approval gate if code modifications are proposed.
 - `GET /task/{thread_id}`: Inspects current state and next scheduled node of a task.
 - `POST /task/{thread_id}/approve`: Submits `{"approved": true}` or `{"approved": false}` to resume the workflow, apply the patch, and execute automated test verification.
+
+---
+
+## 6. Controlled Code Repair & Security Rules
+
+The agent enforces strict safety boundaries designed to prevent accidental regressions, malicious payloads, and unauthorized modifications:
+
+1. **Structured Patch Format**: Every proposed code change includes the target relative file path, clean unified diff, original and proposed content, deterministic `patch_id` (SHA256 digest), and original content checksum.
+2. **Strict Filesystem Boundaries**:
+   - Rejects absolute paths (`/etc/...`, `C:\...`).
+   - Prevents path traversal (`../`) to guarantee all edits stay within `PROJECT_ROOT`.
+   - Protects sensitive files (`.env`, secrets, `.git`, `credentials`).
+   - Restricts modifications to allowed extensions (`.py`, `.json`, `.yaml`, `.md`, `.toml`, etc.).
+3. **Explicit Human Approval**:
+   - Workflows halt immediately before disk writes via LangGraph's `interrupt_before=["apply_patch"]`.
+   - Approvals are cryptographically tied to the exact `patch_id`. Mismatched approvals are rejected.
+4. **Pre-Write Revalidation & Concurrency Protection**:
+   - Compares the file on disk against `expected_original_checksum` before applying any patch.
+   - Detects concurrent edits made while human review was pending and aborts with a conflict error.
+5. **Constrained Automated Verification**:
+   - Verification runs only through predefined test harnesses (`run_verification_tests`).
+   - The LLM is never given arbitrary shell execution access.
+   - Test targets are strictly validated against CLI flag injection, path traversal, and out-of-boundary paths.
+6. **Automatic Rollback & Diff Preservation**:
+   - If verification tests fail after exhausting bounded retries, the file is automatically rolled back to its original state.
+   - The proposed patch diff and full test outputs are preserved in state for inspection.
+
