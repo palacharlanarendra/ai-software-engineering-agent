@@ -21,6 +21,9 @@ from app.schemas import (
     ErrorResponse,
 )
 
+from app.logger import configure_logging
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(

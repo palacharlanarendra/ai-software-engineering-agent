@@ -475,3 +475,64 @@ class TestGraphWorkflow:
             assert final_state["status"] == "rejected"
             assert not final_state["patch_applied"]
             assert test_file.read_text(encoding="utf-8") == "DEBUG = False\n"
+
+    def test_workflow_rolls_back_when_tests_fail_after_approved_patch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("app.tools.repository.PROJECT_ROOT", tmp_path)
+
+        test_file = tmp_path / "module.py"
+        test_file.write_text("VALID_VALUE = 100\n", encoding="utf-8")
+
+        mock_snippets = [{"file_path": "module.py", "content": "VALID_VALUE = 100\n"}]
+        mock_analysis = MagicMock()
+        mock_analysis.status = "success"
+        mock_analysis.errors = []
+        mock_analysis.model_dump.return_value = {
+            "task": "Change value to 200",
+            "summary": "Update constant",
+            "evidence": [],
+            "hypotheses": [],
+            "proposed_changes": [
+                {
+                    "file_path": "module.py",
+                    "description": "Set to 200",
+                    "code_snippet": "VALID_VALUE = 200\n",
+                }
+            ],
+            "status": "success",
+        }
+
+        memory = MemorySaver()
+        graph = build_agent_graph(checkpointer=memory, with_approval_interrupt=True)
+        config = {"configurable": {"thread_id": "session-rollback-test"}}
+
+        with patch("app.agent.nodes.search_code_semantic", return_value=mock_snippets), \
+             patch("app.agent.nodes.analyze_code_task", return_value=mock_analysis), \
+             patch("app.agent.nodes.run_verification_tests", return_value={
+                 "passed": False,
+                 "exit_code": 1,
+                 "output": "FAILED test_module.py::test_val - AssertionError: 200 != 100",
+                 "test_target": "app/tests/",
+             }):
+
+            # 1. Run up to approval boundary
+            state_at_interrupt = graph.invoke(
+                {"task": "Change value to 200"},
+                config=config,
+            )
+            assert state_at_interrupt["status"] == "awaiting_approval"
+
+            # 2. Approve the patch with max_retries set to 0 to test immediate rollback and failure
+            graph.update_state(config, {"approval_status": "approved", "max_retries": 0})
+            final_state = graph.invoke(None, config=config)
+
+            # 3. Assert rollback occurred
+            assert final_state["status"] == "verification_failed"
+            assert not final_state["patch_applied"]
+            # Target file on disk must have been restored to original content
+            assert test_file.read_text(encoding="utf-8") == "VALID_VALUE = 100\n"
+            # Preserves diff and test output in state
+            assert final_state["patch"] is not None
+            assert "+VALID_VALUE = 200" in final_state["patch"]["diff"]
+            assert "AssertionError" in final_state["test_results"]["output"]
+
