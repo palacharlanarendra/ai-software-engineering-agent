@@ -52,13 +52,15 @@ The agent investigates coding tasks using semantic repository search and retriev
 ```text
 ├── app/
 │   ├── config.py             # Centralized settings (PROJECT_ROOT, models, Qdrant)
-│   ├── main.py               # FastAPI entrypoints (/chat, /task, /task/{id}/approve)
+│   ├── main.py               # Thin FastAPI routes and exception handlers
+│   ├── schemas.py            # Pydantic request and response models
 │   ├── requirements.txt      # Pinned environment dependencies
 │   ├── agent/                # LangGraph Orchestration & Workflows
 │   │   ├── agent.py          # Workflow runner & resume APIs
 │   │   ├── graph.py          # StateGraph definition, routing, interrupts & checkpointer
 │   │   ├── nodes.py          # Explicit, isolated graph nodes
 │   │   ├── patch.py          # Diff generation, syntax check, safe write, and rollback
+│   │   ├── service.py        # Thin API service layer decoupling routes from graph state
 │   │   ├── state.py          # Typed AgentState, PatchProposal, VerificationResult
 │   │   ├── tools.py          # LangChain tools for repository inspection
 │   │   └── verifier.py       # Constrained pytest verification runner
@@ -74,9 +76,9 @@ The agent investigates coding tasks using semantic repository search and retriev
 │   │   └── vector_store.py   # Qdrant client factory and collection initialization
 │   ├── tools/                # Repository Filesystem Tools
 │   │   └── repository.py     # list_files, read_file (path-safe), search_code (case-insensitive)
-│   └── tests/                # Automated Pytest Suite (95 passing tests)
+│   └── tests/                # Automated Pytest Suite (99 passing tests)
 │       ├── test_ai_layer.py  # Mocked unit tests for LLM & analyzer
-│       ├── test_api.py       # FastAPI endpoint tests (task lifecycle & approval)
+│       ├── test_api.py       # FastAPI endpoint tests (task lifecycle, proposal inspection & approval)
 │       ├── test_graph.py     # LangGraph routing, patch safety, verifier bounds & interrupts
 │       ├── test_rag.py       # Chunking, indexing, and retrieval tests
 │       └── test_repository.py# Traversal bounds, search, and list tests
@@ -146,12 +148,23 @@ python scripts/index_repository.py
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Endpoints:
-- `GET /`: Health check.
-- `POST /chat`: Simple question-and-answer using the agent.
-- `POST /task`: Starts a full engineering task workflow. Halts at the approval gate if code modifications are proposed.
-- `GET /task/{thread_id}`: Inspects current state and next scheduled node of a task.
-- `POST /task/{thread_id}/approve`: Submits `{"approved": true}` or `{"approved": false}` to resume the workflow, apply the patch, and execute automated test verification.
+### Endpoints & OpenAPI Documentation:
+Interactive Swagger documentation is available at `http://localhost:8000/docs` and OpenAPI JSON at `http://localhost:8000/openapi.json`.
+
+- `GET /health` / `GET /`: Comprehensive health status (`HealthResponse` with Qdrant connectivity and LLM configuration).
+- `POST /chat`: Simple question-and-answer using the agent (`ChatRequest` -> `ChatResponse`).
+- `POST /task`: Starts a full engineering task workflow. Returns `201 Created` with `TaskStateResponse`. Halts at `awaiting_approval` if code modifications are proposed.
+- `GET /task/{thread_id}`: Inspects current lifecycle state, active patch, and next scheduled graph nodes (`TaskStateResponse`). Returns `404` if not found.
+- `GET /task/{thread_id}/proposal`: Dedicated endpoint to inspect the pending structured patch proposal, unified diff, deterministic `patch_id`, and content checksums (`PatchProposalResponse`).
+- `POST /task/{thread_id}/approve`: Submits `{"approved": true, "patch_id": "patch-xxx"}` or `{"approved": false}` to resume the workflow, apply the patch, and execute automated test verification.
+
+All error responses adhere to a consistent structured envelope:
+```json
+{
+  "detail": "Human-readable error explanation",
+  "error_code": "NOT_FOUND | BAD_REQUEST | PROPOSAL_NOT_FOUND"
+}
+```
 
 ---
 
