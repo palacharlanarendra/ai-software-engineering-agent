@@ -1,4 +1,4 @@
-from rag.chunker import chunk_code
+from app.rag.chunker import chunk_code
 
 code = """
 def create_order(order):

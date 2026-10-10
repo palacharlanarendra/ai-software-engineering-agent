@@ -1,17 +1,27 @@
 from pathlib import Path
+from app.config import PROJECT_ROOT, IGNORED_DIRS, SENSITIVE_FILES
 
-PROJECT_ROOT = Path.cwd()
 
 def list_files() -> list[str]:
-    """
-    List all files in the current repository.
-    """
+    """List repository files while skipping ignored directories."""
+
     files = []
-    for path in PROJECT_ROOT.rglob('*'):
-        if path.is_file():
-            files.append(str(path.relative_to(PROJECT_ROOT)))
-        
-    return files
+
+    for path in PROJECT_ROOT.rglob("*"):
+        relative_path = path.relative_to(PROJECT_ROOT)
+
+        if any(part in IGNORED_DIRS for part in relative_path.parts):
+            continue
+
+        if not path.is_file():
+            continue
+
+        if path.name in SENSITIVE_FILES:
+            continue
+
+        files.append(relative_path.as_posix())
+
+    return sorted(files)
 
 def read_file(file_path: str) -> str:
     """
@@ -34,43 +44,50 @@ def read_file(file_path: str) -> str:
 
     return path.read_text()
 
+
 def search_code(query: str) -> list[dict]:
-    """
-    Search repository files for a text string.
+    """Search repository files for a case-insensitive text match."""
 
-    Args:
-        query: Text to search for.
-    """
+    if not query or not query.strip():
+        return []
+
     results = []
-
     root = PROJECT_ROOT.resolve()
-
-    ignored_dirs = {
-        ".git", "my-ai-env", "__pycache__", ".env"
-    }
+    max_file_size = 1_000_000
+    max_results = 50
 
     for path in root.rglob("*"):
+        relative_path = path.relative_to(root)
+
+        if any(part in IGNORED_DIRS for part in relative_path.parts):
+            continue
+
+        if path.name in SENSITIVE_FILES:
+            continue
+
         if not path.is_file():
             continue
-        if any(part in ignored_dirs for part in path.parts):
-            continue
 
-        try: 
+        try:
+            if path.stat().st_size > max_file_size:
+                continue
+
             content = path.read_text(
                 encoding="utf-8",
-                errors="ignore"
+                errors="replace",
             )
-        except Execption:
+        except OSError:
             continue
 
-        for line_number, line in enumerate(
-            content.splitlines(),
-            start=1
-        ):
-            if query.lower() in line.lower():
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if query.casefold() in line.casefold():
                 results.append({
-                    "file": str(path.relative_to(root)),
+                    "file": relative_path.as_posix(),
                     "line": line_number,
-                    "content": line.strip()
+                    "content": line.strip(),
                 })
-    return results[:50]
+
+                if len(results) >= max_results:
+                    return results
+
+    return results
