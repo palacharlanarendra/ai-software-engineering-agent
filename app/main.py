@@ -1,4 +1,5 @@
 import logging
+import platform
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
@@ -86,6 +87,32 @@ async def value_error_handler(request: Request, exc: ValueError):
 def get_health() -> HealthResponse:
     """Return health status including Qdrant and LLM configuration."""
     return check_system_health()
+
+
+@app.get(
+    "/system/info",
+    tags=["System"],
+    summary="Return system and python environment information",
+)
+def get_system_info():
+    return {
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+    }
+
+
+@app.get(
+    "/version",
+    tags=["System"],
+    summary="Return application version and environment status",
+)
+def get_version():
+    health = check_system_health()
+    return {
+        "title": app.title,
+        "version": app.version,
+        "status": health.status,
+    }
 
 
 # ==============================================================================

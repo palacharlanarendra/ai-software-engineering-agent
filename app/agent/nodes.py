@@ -45,22 +45,30 @@ def retrieve_context_node(state: AgentState) -> Dict[str, Any]:
     try:
         semantic_results = search_code_semantic(task, limit=5)
         for r in semantic_results:
-            if hasattr(r, "file_path"):
-                snippets.append({
-                    "file_path": r.file_path,
-                    "start_line": r.start_line,
-                    "end_line": r.end_line,
-                    "content": r.content,
-                    "score": r.score,
-                })
-            elif isinstance(r, dict):
-                snippets.append({
-                    "file_path": r.get("file_path", r.get("file", "")),
-                    "start_line": r.get("start_line", r.get("line", 1)),
-                    "end_line": r.get("end_line", r.get("line", 1)),
-                    "content": r.get("content", ""),
-                    "score": r.get("score", 0.5),
-                })
+            file_path = getattr(r, "file_path", None) or (r.get("file_path") if isinstance(r, dict) else "")
+            start_line = getattr(r, "start_line", 1) or (r.get("start_line", 1) if isinstance(r, dict) else 1)
+            end_line = getattr(r, "end_line", 1) or (r.get("end_line", 1) if isinstance(r, dict) else 1)
+            score = getattr(r, "score", 0.5) or (r.get("score", 0.5) if isinstance(r, dict) else 0.5)
+            content = getattr(r, "content", "") or (r.get("content", "") if isinstance(r, dict) else "")
+
+            # Hydrate snippet from disk if available to guarantee 100% freshness
+            try:
+                from app.config import PROJECT_ROOT
+                target_disk_path = (PROJECT_ROOT / file_path).resolve()
+                if target_disk_path.is_file():
+                    disk_lines = target_disk_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if disk_lines and start_line <= len(disk_lines):
+                        content = "\n".join(disk_lines[max(0, start_line - 1): min(len(disk_lines), end_line)])
+            except Exception:
+                pass
+
+            snippets.append({
+                "file_path": file_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "content": content,
+                "score": score,
+            })
     except Exception as exc:
         logger.warning(f"Semantic search failed during node execution: {exc}")
 
@@ -151,6 +159,7 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
     target_file = first_change.get("file_path", "")
     description = first_change.get("description", "")
     proposed_code = first_change.get("code_snippet", "")
+    original_snippet = first_change.get("original_snippet", "")
     errors = list(state.get("errors", []))
 
     # 1. Validate target file path against security rules
@@ -191,9 +200,48 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
                 "errors": errors,
             }
 
-    proposed_content = proposed_code if proposed_code is not None else orig_content
+    # 3. Determine proposed content (supporting snippet-level replacement on existing files)
+    file_changes = [c for c in proposed_changes if c.get("file_path") == target_file] or [first_change]
+    if file_existed:
+        proposed_content = orig_content
+        for change in file_changes:
+            orig_snip = change.get("original_snippet") or ""
+            prop_snip = change.get("code_snippet") or ""
 
-    # 3. Detect no-op proposals on existing files
+            if orig_snip.strip():
+                if orig_snip in proposed_content:
+                    proposed_content = proposed_content.replace(orig_snip, prop_snip, 1)
+                elif orig_snip.strip() in proposed_content:
+                    proposed_content = proposed_content.replace(orig_snip.strip(), prop_snip.strip(), 1)
+                else:
+                    errors.append(f"Target original_snippet not found in {target_file}")
+                    return {
+                        "patch": None,
+                        "approval_status": "not_needed",
+                        "approved_patch_id": None,
+                        "status": "failed",
+                        "errors": errors,
+                    }
+            elif prop_snip and prop_snip != proposed_content:
+                # Fallback: check if proposed_code is a snippet and evidence provides matching original lines
+                matched_ev = None
+                for ev in analysis.get("evidence", []):
+                    ev_file = ev.get("file_path") if isinstance(ev, dict) else getattr(ev, "file_path", "")
+                    ev_snip = ev.get("snippet") if isinstance(ev, dict) else getattr(ev, "snippet", "")
+                    if ev_file == target_file and ev_snip and ev_snip.strip() in proposed_content:
+                        matched_ev = ev_snip.strip()
+                        break
+
+                if matched_ev and len(prop_snip.splitlines()) < max(2, len(proposed_content.splitlines()) // 2):
+                    proposed_content = proposed_content.replace(matched_ev, prop_snip.strip(), 1)
+                else:
+                    proposed_content = prop_snip
+            else:
+                proposed_content = prop_snip
+    else:
+        proposed_content = proposed_code if proposed_code is not None else ""
+
+    # 4. Detect no-op proposals on existing files
     if file_existed and proposed_content == orig_content:
         return {
             "patch": None,
@@ -203,7 +251,7 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
             "errors": errors,
         }
 
-    # 4. Strict syntax validation: if invalid, do NOT produce an approvable patch
+    # 5. Strict syntax validation: if invalid, do NOT produce an approvable patch
     syntax_err = validate_patch_syntax(proposed_content, target_file)
     if syntax_err:
         errors.append(syntax_err)
@@ -215,7 +263,7 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
             "errors": errors,
         }
 
-    # 5. Generate unified diff
+    # 6. Generate unified diff
     diff = create_unified_diff(orig_content, proposed_content, target_file)
 
     # 6. Generate deterministic full-SHA256 patch ID and checksums

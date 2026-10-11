@@ -15,7 +15,11 @@ class ProposedChange(BaseModel):
     file_path: str = Field(description="Target repository file to modify or create")
     description: str = Field(description="Description of what should be changed")
     rationale: str = Field(description="Why this change addresses the task or root cause")
-    code_snippet: str = Field(default="", description="Proposed new or modified code snippet")
+    original_snippet: str = Field(
+        default="",
+        description="The exact existing code block or line in the target file to be replaced. Leave empty if creating a new file or providing full file content.",
+    )
+    code_snippet: str = Field(default="", description="Proposed new or modified code snippet to replace original_snippet (or full file content for new files)")
 
 
 class CodeAnalysisResult(BaseModel):

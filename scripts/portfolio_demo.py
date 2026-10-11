@@ -32,7 +32,7 @@ def print_banner(title: str):
 
 def demo_successful_investigation():
     print_banner("Demo 1: Evidence-Grounded Investigation")
-    query = "Where is repository path traversal handled?"
+    query = "In app/main.py, add an endpoint @app.get('/version') that returns the application title, version, and environment status."
     print(f"Task: \"{query}\"\n")
 
     print("[Step 1] Executing Qdrant Semantic Retrieval...")
@@ -42,7 +42,8 @@ def demo_successful_investigation():
         print(f"  • {r.file_path} (lines {r.start_line}-{r.end_line}) [Score: {r.score:.3f}]")
 
     print("\n[Step 2] Running Agent Workflow through LangGraph...")
-    state = run_agent_workflow(query)
+    thread_id = "portfolio-demo-session"
+    state = run_agent_workflow(query, thread_id=thread_id)
 
     print(f"Workflow Status: {state.get('status')}")
     analysis = state.get("analysis") or {}
@@ -54,7 +55,31 @@ def demo_successful_investigation():
         print(f"  • File: {ev.get('file_path')} (lines {ev.get('start_line')}-{ev.get('end_line')})")
         print(f"    Explanation: {ev.get('explanation')[:120]}...")
 
-    print(f"\nProposed Code Changes: {len(analysis.get('proposed_changes', []))} (Read-only query - no code changes needed)")
+    patch = state.get("patch")
+    if patch:
+        print(f"\nProposed Code Changes: {len(analysis.get('proposed_changes', []))}")
+        print(f"  • Target File: {patch.get('file_path')}")
+        print(f"  • Patch ID:    {patch.get('patch_id')}")
+        print("  • Unified Diff:")
+        for line in patch.get("diff", "").splitlines():
+            print(f"      {line}")
+
+        print("\n[Step 3] Approving Patch and Executing Verification...")
+        final_state = approve_and_resume_workflow(
+            thread_id=thread_id,
+            approved=True,
+            patch_id=patch.get("patch_id"),
+        )
+        print(f"Workflow Status: {final_state.get('status')}")
+        print(f"Patch Applied to Disk: {final_state.get('patch_applied')}")
+        test_res = final_state.get("test_results") or {}
+        print(f"Automated Tests Passed: {test_res.get('passed', False)}")
+        if final_state.get("errors"):
+            print(f"Post-Approval Errors: {final_state.get('errors')}")
+    else:
+        print(f"\nProposed Code Changes: {len(analysis.get('proposed_changes', []))}")
+        if state.get("errors"):
+            print(f"Workflow Errors: {state.get('errors')}")
 
 
 def demo_blocked_unsafe_operations():

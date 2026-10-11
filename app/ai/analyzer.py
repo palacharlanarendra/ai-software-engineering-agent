@@ -19,7 +19,11 @@ You must strictly categorize your analysis into three distinct components:
 2. HYPOTHESES: Logical deductions, root causes, or architectural explanations.
    - Clearly explain why the system behaves as it does based on the evidence.
 3. PROPOSED CHANGES: Concrete, actionable code modifications addressing the task.
-   - Identify target files and propose minimal, precise fixes or additions.
+   - Identify target files.
+   - For modifying existing files, specify BOTH:
+     * `original_snippet`: The exact line or block of existing code from the file that needs to be replaced.
+     * `code_snippet`: The exact replacement line or block of code.
+   - For creating new files, leave `original_snippet` empty and put the complete file content in `code_snippet`.
 
 If the provided evidence is completely insufficient to address the task:
 - Set status to 'insufficient_context'.
