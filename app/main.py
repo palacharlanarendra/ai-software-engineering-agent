@@ -1,8 +1,13 @@
 import logging
 import platform
+import subprocess
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
+from app.config import PROJECT_ROOT
+from app.tools.repository import list_files, read_file
 from app.agent.agent import run_agent
 from app.agent.service import (
     check_system_health,
@@ -35,6 +40,10 @@ app = FastAPI(
     ),
     version="3.0.0",
 )
+
+STATIC_DIR = PROJECT_ROOT / "app" / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ==============================================================================
@@ -78,15 +87,71 @@ async def value_error_handler(request: Request, exc: ValueError):
     tags=["System"],
     summary="Comprehensive system health check",
 )
-@app.get(
-    "/",
-    response_model=HealthResponse,
-    tags=["System"],
-    summary="Root service health status",
-)
 def get_health() -> HealthResponse:
     """Return health status including Qdrant and LLM configuration."""
     return check_system_health()
+
+
+@app.get(
+    "/",
+    tags=["System"],
+    summary="Root service health status or Cloud IDE",
+)
+def get_root(request: Request):
+    """Return Web IDE for browsers or health status JSON for API clients."""
+    if "text/html" in request.headers.get("accept", "") and (STATIC_DIR / "index.html").exists():
+        return FileResponse(STATIC_DIR / "index.html")
+    return check_system_health()
+
+
+@app.get("/ide", include_in_schema=False)
+@app.get("/demo", include_in_schema=False)
+def get_ide():
+    """Direct browser route to SWE Agent Cloud IDE."""
+    if (STATIC_DIR / "index.html").exists():
+        return FileResponse(STATIC_DIR / "index.html")
+    return {"message": "IDE frontend static files not found"}
+
+
+@app.get("/api/files", tags=["IDE"], summary="List repository files for Cloud IDE")
+def get_repository_files() -> list[str]:
+    """List active repository files filtered for IDE file tree."""
+    all_files = list_files()
+    filtered = [
+        f for f in all_files
+        if not f.startswith(".")
+        and "/." not in f
+        and not f.endswith(".tmp")
+        and not f.endswith(".pyc")
+    ]
+    return sorted(filtered)
+
+
+@app.get("/api/file", tags=["IDE"], summary="Read repository file for Cloud IDE")
+def get_file_content(path: str):
+    """Read file content safely within repository root."""
+    content = read_file(path)
+    if content == "Access denied.":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if content.startswith("file not found:"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=content)
+    return {"path": path, "content": content}
+
+
+@app.post("/api/reset", tags=["IDE"], summary="Reset repository sandbox to clean git commit")
+def reset_demo_sandbox():
+    """Revert files to git clean state for demo visitors."""
+    try:
+        subprocess.run(
+            ["git", "checkout", "app/main.py", "app/schemas.py", "app/tests/test_api.py"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return {"status": "ok", "message": "Sandbox reset successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @app.get(

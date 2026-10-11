@@ -32,7 +32,7 @@ def print_banner(title: str):
 
 def demo_successful_investigation():
     print_banner("Demo 1: Evidence-Grounded Investigation")
-    query = "In app/main.py, add an endpoint @app.get('/version') that returns the application title, version, and environment status."
+    query = "In app/schemas.py, add an optional field 'timestamp: Optional[str] = None' to the HealthResponse model."
     print(f"Task: \"{query}\"\n")
 
     print("[Step 1] Executing Qdrant Semantic Retrieval...")

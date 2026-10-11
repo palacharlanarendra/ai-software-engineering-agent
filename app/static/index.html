@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Software Engineering Agent — Cloud IDE</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Monaco Editor AMD Loader -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.js"></script>
+</head>
+<body class="vscode-theme">
+    <!-- Top Navigation Header -->
+    <header class="ide-header">
+        <div class="header-left">
+            <div class="app-brand">
+                <span class="brand-icon">⚡</span>
+                <span class="brand-title">SWE Agent IDE</span>
+                <span class="badge badge-branch">version-3</span>
+            </div>
+            <div class="header-divider"></div>
+            <div class="active-file-breadcrumb" id="active-breadcrumb">
+                <span class="folder-path">app /</span>
+                <span class="file-name" id="breadcrumb-filename">main.py</span>
+            </div>
+        </div>
+
+        <div class="header-center">
+            <div class="system-status-pills">
+                <div class="status-pill" id="qdrant-status-pill">
+                    <span class="status-dot dot-green"></span>
+                    <span class="pill-text">Qdrant Vector DB</span>
+                </div>
+                <div class="status-pill" id="llm-status-pill">
+                    <span class="status-dot dot-purple"></span>
+                    <span class="pill-text">Gemini 2.5 Flash</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="header-right">
+            <button class="btn btn-secondary btn-sm" id="btn-reset-sandbox" title="Reset modified files to clean git commit">
+                <span class="icon">↺</span> Reset Sandbox
+            </button>
+            <a href="/docs" target="_blank" class="btn btn-ghost btn-sm" title="View OpenAPI Swagger Documentation">
+                API Docs ↗
+            </a>
+        </div>
+    </header>
+
+    <!-- Main Workspace Container -->
+    <main class="ide-workspace">
+        <!-- 1. Left Sidebar: File Explorer -->
+        <aside class="sidebar-explorer" id="sidebar-explorer">
+            <div class="panel-header">
+                <span class="panel-title">EXPLORER</span>
+                <button class="btn-icon" id="btn-refresh-files" title="Refresh File Tree">⟳</button>
+            </div>
+            <div class="search-files-box">
+                <input type="text" id="file-search-input" placeholder="Search files... (e.g. main.py)">
+            </div>
+            <div class="file-tree-container" id="file-tree-container">
+                <div class="tree-loading">Loading repository files...</div>
+            </div>
+        </aside>
+
+        <!-- 2. Center Panel: Code Editor & Diff Viewer + Integrated Terminal -->
+        <section class="editor-workspace">
+            <div class="editor-tabbar">
+                <div class="tabs-container">
+                    <div class="tab-item active" id="current-file-tab">
+                        <span class="tab-icon">🐍</span>
+                        <span class="tab-title" id="tab-filename">app/main.py</span>
+                    </div>
+                </div>
+
+                <div class="editor-mode-switch">
+                    <button class="mode-btn active" id="btn-view-code" data-mode="code">
+                        <span>📝 Code</span>
+                    </button>
+                    <button class="mode-btn" id="btn-view-diff" data-mode="diff" disabled>
+                        <span>⚡ Diff View</span>
+                    </button>
+                    <div class="diff-style-toggle" id="diff-style-toggle" style="display: none;">
+                        <button class="style-btn active" id="btn-diff-split" title="Side by side split diff">Split</button>
+                        <button class="style-btn" id="btn-diff-inline" title="Inline unified diff">Inline</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Monaco Editor Container -->
+            <div class="editor-viewport" id="editor-viewport">
+                <div id="monaco-code-container" class="monaco-wrapper"></div>
+                <div id="monaco-diff-container" class="monaco-wrapper" style="display: none;"></div>
+            </div>
+
+            <!-- Bottom Drawer: Integrated Terminal / Pytest Runner -->
+            <div class="bottom-drawer" id="bottom-drawer">
+                <div class="drawer-header">
+                    <div class="drawer-tabs">
+                        <button class="drawer-tab active" data-tab="test-results">
+                            <span class="tab-indicator" id="test-indicator"></span>
+                            🧪 Test Output (Pytest)
+                        </button>
+                        <button class="drawer-tab" data-tab="agent-logs">
+                            📋 Execution Trace
+                        </button>
+                    </div>
+                    <div class="drawer-controls">
+                        <button class="btn-icon" id="btn-clear-console" title="Clear console">⊘</button>
+                        <button class="btn-icon" id="btn-toggle-drawer" title="Toggle drawer size">▲</button>
+                    </div>
+                </div>
+                <div class="drawer-body">
+                    <div class="drawer-panel active" id="panel-test-results">
+                        <pre class="terminal-output" id="terminal-test-output">Pytest console idle. Run a task or approve a patch to trigger automated test verification.</pre>
+                    </div>
+                    <div class="drawer-panel" id="panel-agent-logs">
+                        <pre class="terminal-output" id="terminal-agent-output">Agent execution logs will appear here during task processing.</pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 3. Right Sidebar: Cursor / Devin Agent Copilot -->
+        <aside class="sidebar-agent" id="sidebar-agent">
+            <div class="panel-header agent-header">
+                <div class="agent-title-box">
+                    <span class="agent-avatar">🤖</span>
+                    <div>
+                        <div class="panel-title">SWE AGENT COPILOT</div>
+                        <div class="agent-status-label" id="agent-status-label">Ready for instructions</div>
+                    </div>
+                </div>
+                <span class="status-badge badge-idle" id="agent-status-badge">IDLE</span>
+            </div>
+
+            <div class="agent-content-scroll">
+                <!-- Task Input Area -->
+                <div class="task-input-section">
+                    <label for="task-prompt" class="section-label">TASK SPECIFICATION</label>
+                    <div class="prompt-textarea-wrapper">
+                        <textarea id="task-prompt" rows="3" placeholder="Describe the feature or fix... (e.g. In app/main.py, add an endpoint @app.get('/version')...)"></textarea>
+                    </div>
+
+                    <!-- Preset Prompt Pills -->
+                    <div class="prompt-pills-container">
+                        <span class="pills-title">Quick Prompts (Click to test):</span>
+                        <div class="pills-list">
+                            <button class="pill-btn" data-prompt="In app/main.py, add an endpoint @app.get('/ping') that returns {'ping': 'pong'}.">
+                                ⚡ + Add /ping API
+                            </button>
+                            <button class="pill-btn" data-prompt="In app/schemas.py, add an optional field 'environment: str = &quot;production&quot;' to HealthResponse.">
+                                🏷️ + Add Environment Field to Schema
+                            </button>
+                            <button class="pill-btn" data-prompt="In app/tools/repository.py, add a helper function count_repository_files() -> int that returns the count of files.">
+                                📊 + Add File Count Utility
+                            </button>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-block" id="btn-run-agent">
+                        <span class="btn-spinner" id="run-spinner" style="display: none;"></span>
+                        <span class="btn-text">Generate Patch Proposal ➔</span>
+                    </button>
+                </div>
+
+                <!-- No Changes Banner -->
+                <div class="no-changes-banner" id="no-changes-banner" style="display: none;">
+                    <div class="banner-icon">ℹ️</div>
+                    <div class="banner-body">
+                        <div class="banner-title">Requirement Already Satisfied</div>
+                        <div class="banner-detail" id="no-changes-detail">The requested feature or fix is already implemented in the code. Inspect the editor to verify.</div>
+                    </div>
+                </div>
+
+                <!-- Agent Stepper Progress -->
+                <div class="agent-stepper" id="agent-stepper" style="display: none;">
+                    <div class="stepper-track">
+                        <div class="step-item" id="step-intake">
+                            <div class="step-dot">1</div>
+                            <div class="step-info">
+                                <span class="step-title">Intake & Validation</span>
+                                <span class="step-detail">Task sanitized</span>
+                            </div>
+                        </div>
+                        <div class="step-item" id="step-retrieval">
+                            <div class="step-dot">2</div>
+                            <div class="step-info">
+                                <span class="step-title">Semantic Retrieval</span>
+                                <span class="step-detail" id="step-retrieval-detail">Querying Qdrant...</span>
+                            </div>
+                        </div>
+                        <div class="step-item" id="step-analysis">
+                            <div class="step-dot">3</div>
+                            <div class="step-info">
+                                <span class="step-title">Diagnostic Reasoning</span>
+                                <span class="step-detail" id="step-analysis-detail">Analyzing with Gemini...</span>
+                            </div>
+                        </div>
+                        <div class="step-item" id="step-proposal">
+                            <div class="step-dot">4</div>
+                            <div class="step-info">
+                                <span class="step-title">Patch Proposal</span>
+                                <span class="step-detail" id="step-proposal-detail">Diff generated</span>
+                            </div>
+                        </div>
+                        <div class="step-item" id="step-verification">
+                            <div class="step-dot">5</div>
+                            <div class="step-info">
+                                <span class="step-title">Verification Tests</span>
+                                <span class="step-detail" id="step-verification-detail">Awaiting approval</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Diagnosis & Evidence Card -->
+                <div class="evidence-section" id="evidence-section" style="display: none;">
+                    <label class="section-label">DIAGNOSIS & EVIDENCE CITATIONS</label>
+                    <div class="diagnosis-card" id="diagnosis-card">
+                        <p class="diagnosis-summary" id="diagnosis-summary-text"></p>
+                        <div class="citations-list" id="citations-list"></div>
+                    </div>
+                </div>
+
+                <!-- Human Approval Gate Action Banner -->
+                <div class="approval-gate-banner" id="approval-gate-banner" style="display: none;">
+                    <div class="gate-header">
+                        <span class="gate-icon">🛡️</span>
+                        <div>
+                            <div class="gate-title">HUMAN APPROVAL REQUIRED</div>
+                            <div class="gate-subtitle">Inspect the generated diff before writing to disk</div>
+                        </div>
+                    </div>
+                    <div class="patch-id-tag">
+                        <span class="tag-label">PATCH ID:</span>
+                        <code id="gate-patch-id">patch-unknown</code>
+                    </div>
+                    <div class="gate-actions">
+                        <button class="btn btn-success btn-block" id="btn-approve-patch">
+                            <span class="btn-spinner" id="approve-spinner" style="display: none;"></span>
+                            <span class="btn-text">✅ Approve & Apply Patch</span>
+                        </button>
+                        <button class="btn btn-danger btn-block" id="btn-reject-patch">
+                            ❌ Reject Patch
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Post-Approval Result Card -->
+                <div class="result-card" id="result-card" style="display: none;">
+                    <div class="result-header">
+                        <span class="result-icon" id="result-icon">🎉</span>
+                        <div>
+                            <div class="result-title" id="result-title">Patch Verified Successfully</div>
+                            <div class="result-subtitle" id="result-subtitle">All tests passed</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Toast Notification Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
