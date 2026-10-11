@@ -1,6 +1,8 @@
 import ast
 import difflib
 import hashlib
+import os
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -23,14 +25,23 @@ PERMITTED_EXTENSIONS = {
 
 
 def compute_content_checksum(content: str) -> str:
-    """Compute deterministic SHA256 checksum of content string."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    """Compute deterministic full SHA256 checksum of content string."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def create_patch_id(file_path: str, proposed_content: str) -> str:
-    """Generate a unique, tamper-evident patch ID tied to the exact file and proposed content."""
-    seed = f"{file_path}:{proposed_content}"
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+def create_patch_id(
+    file_path: str,
+    proposed_content: str,
+    expected_original_checksum: Optional[str] = None,
+) -> str:
+    """
+    Generate a unique, tamper-evident full-SHA256 patch ID tied to:
+    the target path, the expected original content hash, and the proposed content hash.
+    """
+    orig_part = expected_original_checksum or compute_content_checksum("")
+    prop_part = compute_content_checksum(proposed_content)
+    seed = f"{file_path}:{orig_part}:{prop_part}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return f"patch-{digest}"
 
 
@@ -71,8 +82,10 @@ def validate_patch_syntax(
 def validate_target_path(file_path: str) -> Tuple[bool, Optional[Path], Optional[str]]:
     """
     Strictly validate a file path against repository security rules:
+    - Rejects empty paths
     - Rejects absolute paths
     - Rejects path traversal (escaping root)
+    - Rejects symlinks escaping repository root
     - Rejects ignored directories
     - Rejects sensitive files
     - Restricts to permitted file extensions
@@ -92,8 +105,16 @@ def validate_target_path(file_path: str) -> Tuple[bool, Optional[Path], Optional
     target_path = (root / file_path).resolve()
 
     # 2. Path traversal security check (must stay inside root)
+    # Also catches symlinks pointing outside root via Path.resolve()
     if root not in target_path.parents and target_path != root:
         return False, None, f"Access denied: path '{file_path}' escapes repository root."
+
+    # Verify that raw path did not attempt to traverse out via symlinks
+    raw_unresolved = (root / file_path)
+    if raw_unresolved.is_symlink():
+        symlink_target = raw_unresolved.resolve()
+        if root not in symlink_target.parents and symlink_target != root:
+            return False, None, f"Access denied: symlink '{file_path}' points outside repository root."
 
     relative_path = target_path.relative_to(root)
 
@@ -112,72 +133,178 @@ def validate_target_path(file_path: str) -> Tuple[bool, Optional[Path], Optional
     return True, target_path, None
 
 
+def _atomic_write_file(target_path: Path, content: str) -> None:
+    """Write content to target path atomically via a temporary file and atomic rename."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = target_path.with_name(f".{target_path.name}.tmp.{uuid.uuid4().hex}")
+    try:
+        temp_file.write_text(content, encoding="utf-8")
+        os.replace(temp_file, target_path)
+    except Exception:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except OSError:
+                pass
+        raise
+
+
+class ApplyPatchResult(tuple):
+    """
+    Backwards-compatible tuple subclass representing the result of applying a patch.
+    Unpacks as (success, original_content, error_message), while also exposing
+    named properties and .file_existed_before.
+    """
+    def __new__(
+        cls,
+        success: bool,
+        original_content: Optional[str],
+        error_message: Optional[str],
+        file_existed_before: bool = False,
+    ):
+        instance = super().__new__(cls, (success, original_content, error_message))
+        instance.file_existed_before = file_existed_before
+        return instance
+
+    @property
+    def success(self) -> bool:
+        return self[0]
+
+    @property
+    def original_content(self) -> Optional[str]:
+        return self[1]
+
+    @property
+    def error_message(self) -> Optional[str]:
+        return self[2]
+
+
 def apply_patch_safely(
     file_path: str,
     proposed_content: str,
     expected_original_checksum: Optional[str] = None,
-) -> Tuple[bool, Optional[str], Optional[str]]:
+) -> ApplyPatchResult:
     """
     Safely write approved patch content to a repository file within permitted bounds.
     Revalidates the patch, path rules, syntax, and verifies that the file on disk
     has not changed since the proposal was generated.
 
     Returns:
-        (success, original_content, error_message)
+        ApplyPatchResult(success, original_content, error_message, file_existed_before)
     """
     # 1. Validate path security and permissions
     valid_path, target_path, err = validate_target_path(file_path)
     if not valid_path or target_path is None:
-        return False, None, err
+        return ApplyPatchResult(False, None, err, False)
 
     # 2. Syntax revalidation
     syntax_err = validate_patch_syntax(proposed_content, file_path)
     if syntax_err:
-        return False, None, syntax_err
+        return ApplyPatchResult(False, None, syntax_err, False)
 
     # 3. Read current content and check for concurrent modifications
+    file_existed_before = target_path.exists()
     original_content = ""
-    if target_path.exists():
+
+    if file_existed_before:
         if not target_path.is_file():
-            return False, None, f"Cannot write to non-file path: {file_path}"
+            return ApplyPatchResult(False, None, f"Cannot write to non-file path: {file_path}", True)
         try:
             original_content = target_path.read_text(encoding="utf-8")
         except OSError as exc:
-            return False, None, f"Failed to read existing file: {exc}"
+            return ApplyPatchResult(False, None, f"Failed to read existing file: {exc}", True)
 
         # If an expected original checksum was provided, verify file has not changed
         if expected_original_checksum:
             current_checksum = compute_content_checksum(original_content)
             if current_checksum != expected_original_checksum:
-                return (
+                return ApplyPatchResult(
                     False,
                     original_content,
                     "Conflict detected: The file on disk was modified after the patch proposal "
                     "was generated. Revalidation failed to prevent overwriting concurrent changes.",
+                    True,
                 )
     else:
-        # Parent directory must exist
-        target_path.parent.mkdir(parents=True, exist_ok=True)
+        # File does not exist yet; if an expected original checksum was provided, it must match empty content
+        if expected_original_checksum:
+            empty_checksum = compute_content_checksum("")
+            if expected_original_checksum != empty_checksum:
+                return ApplyPatchResult(
+                    False,
+                    "",
+                    "Conflict detected: Expected original content checksum does not match nonexistent file baseline.",
+                    False,
+                )
 
-    # 4. Apply file write
+    # 4. Atomic file write
     try:
-        target_path.write_text(proposed_content, encoding="utf-8")
-        return True, original_content, None
+        _atomic_write_file(target_path, proposed_content)
+        return ApplyPatchResult(True, original_content, None, file_existed_before)
     except OSError as exc:
-        return False, original_content, f"Failed to write file {file_path}: {exc}"
+        return ApplyPatchResult(False, original_content, f"Failed to write file {file_path}: {exc}", file_existed_before)
 
 
 def rollback_patch(
     file_path: str,
-    original_content: str,
+    original_content: Optional[str] = None,
+    file_existed_before: bool = True,
+    expected_applied_checksum: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Restore the previous file content following failed verification."""
+    """
+    Restore the previous repository file state following failed verification.
+    Conflict-aware:
+    - If the file was newly created by the agent, removes it only if it still matches
+      the exact content written by the agent.
+    - If the file existed before, restores original content only if the file on disk
+      matches the expected applied content (detects concurrent developer edits).
+    - Uses atomic file replacement and handles filesystem exceptions explicitly.
+
+    Returns:
+        (success, error_message)
+    """
     valid_path, target_path, err = validate_target_path(file_path)
     if not valid_path or target_path is None:
         return False, err
 
+    # Case A: File does not exist on disk
+    if not target_path.exists():
+        if not file_existed_before:
+            # File was created by agent and is already removed
+            return True, None
+        else:
+            return False, f"Rollback conflict: file '{file_path}' was deleted before rollback could restore it."
+
+    if not target_path.is_file():
+        return False, f"Rollback conflict: path '{file_path}' is not a regular file."
+
+    # Read current content on disk
     try:
-        target_path.write_text(original_content, encoding="utf-8")
+        current_disk_content = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"Rollback error: failed to read '{file_path}' from disk: {exc}"
+
+    # Conflict check: verify file has not been modified since patch application
+    if expected_applied_checksum:
+        current_checksum = compute_content_checksum(current_disk_content)
+        if current_checksum != expected_applied_checksum:
+            return (
+                False,
+                f"Rollback conflict: file '{file_path}' was modified after patch application. "
+                "Refusing to rollback to prevent destroying external concurrent modifications.",
+            )
+
+    # Case B: File was created by agent -> delete it safely
+    if not file_existed_before:
+        try:
+            target_path.unlink()
+            return True, None
+        except OSError as exc:
+            return False, f"Rollback error: failed to remove created file '{file_path}': {exc}"
+
+    # Case C: File existed before -> restore original content atomically
+    try:
+        _atomic_write_file(target_path, original_content if original_content is not None else "")
         return True, None
     except OSError as exc:
-        return False, f"Failed to rollback file {file_path}: {exc}"
+        return False, f"Rollback error: failed to restore original content to '{file_path}': {exc}"

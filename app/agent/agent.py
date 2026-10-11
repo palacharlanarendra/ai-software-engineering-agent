@@ -35,7 +35,9 @@ def run_agent_workflow(
 
     # If auto-approval is enabled and graph is awaiting approval, approve and resume
     if auto_approve and state.get("status") == "awaiting_approval":
-        agent_graph.update_state(config, {"approval_status": "approved"})
+        patch = state.get("patch") or {}
+        patch_id = patch.get("patch_id")
+        agent_graph.update_state(config, {"approval_status": "approved", "approved_patch_id": patch_id})
         state = agent_graph.invoke(None, config=config)
 
     return state

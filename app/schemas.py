@@ -45,6 +45,7 @@ class PatchProposalResponse(BaseModel):
     proposed_content: str = Field(description="Proposed file content")
     expected_original_checksum: str = Field(description="SHA256 checksum of original content")
     proposed_checksum: str = Field(description="SHA256 checksum of proposed content")
+    file_existed_before: bool = Field(default=True, description="Whether target file existed prior to patch")
 
 
 class VerificationResultResponse(BaseModel):

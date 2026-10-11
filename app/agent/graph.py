@@ -25,25 +25,61 @@ logger = logging.getLogger(__name__)
 
 
 def rollback_and_retry_node(state: AgentState) -> dict:
-    """Roll back previous patch before making a bounded retry attempt."""
+    """
+    Roll back previous patch before making a bounded retry attempt.
+    Inspects rollback result; if rollback fails, halts retries immediately
+    and marks state as rollback_failed.
+    """
     patch = state.get("patch")
-    orig = state.get("original_file_content")
-    if patch and orig is not None:
-        rollback_patch(patch["file_path"], orig)
+    errors = list(state.get("errors", []))
+
+    if patch:
+        success, err = rollback_patch(
+            file_path=patch["file_path"],
+            original_content=state.get("original_file_content"),
+            file_existed_before=state.get("file_existed_before", True),
+            expected_applied_checksum=state.get("expected_applied_checksum"),
+        )
+        if not success:
+            errors.append(f"Rollback failed during retry: {err}")
+            return {
+                "status": "rollback_failed",
+                "patch_applied": True,
+                "errors": errors,
+            }
 
     return {
         "retry_count": state.get("retry_count", 0) + 1,
         "patch_applied": False,
+        "approval_status": "pending",
+        "approved_patch_id": None,
+        "patch": None,
         "status": "retrying",
     }
 
 
 def rollback_and_fail_node(state: AgentState) -> dict:
-    """Roll back modified file when verification fails and retries are exhausted."""
+    """
+    Roll back modified file when verification fails and retries are exhausted.
+    If rollback fails, sets terminal status to rollback_failed.
+    """
     patch = state.get("patch")
-    orig = state.get("original_file_content")
-    if patch and orig is not None:
-        rollback_patch(patch["file_path"], orig)
+    errors = list(state.get("errors", []))
+
+    if patch:
+        success, err = rollback_patch(
+            file_path=patch["file_path"],
+            original_content=state.get("original_file_content"),
+            file_existed_before=state.get("file_existed_before", True),
+            expected_applied_checksum=state.get("expected_applied_checksum"),
+        )
+        if not success:
+            errors.append(f"Rollback failed after verification failure: {err}")
+            return {
+                "status": "rollback_failed",
+                "patch_applied": True,
+                "errors": errors,
+            }
 
     return {
         "patch_applied": False,
@@ -52,7 +88,7 @@ def rollback_and_fail_node(state: AgentState) -> dict:
 
 
 def handle_rejection_node(state: AgentState) -> dict:
-    """Handle human rejection of proposed patch."""
+    """Handle human rejection of proposed patch without modifying files."""
     return {
         "status": "rejected",
         "patch_applied": False,
@@ -65,36 +101,37 @@ def handle_rejection_node(state: AgentState) -> dict:
 
 
 def route_after_validation(state: AgentState) -> Literal["retrieve_context", "__end__"]:
-    if state.get("status") == "failed":
+    if state.get("status") != "validated":
         return "__end__"
     return "retrieve_context"
 
 
 def route_after_retrieval(state: AgentState) -> Literal["analyze_evidence", "__end__"]:
-    if state.get("status") == "insufficient_context":
+    if state.get("status") != "retrieved":
         return "__end__"
     return "analyze_evidence"
 
 
 def route_after_analysis(state: AgentState) -> Literal["propose_patch", "__end__"]:
-    if state.get("status") in ["insufficient_context", "failed"]:
+    if state.get("status") != "analyzed":
         return "__end__"
     return "propose_patch"
 
 
 def route_after_propose(state: AgentState) -> Literal["apply_patch", "__end__"]:
-    if state.get("status") == "no_changes_needed":
+    # Only route to apply_patch if a valid patch is awaiting human approval
+    if state.get("status") != "awaiting_approval":
         return "__end__"
     return "apply_patch"
 
 
 def route_after_apply(state: AgentState) -> Literal["verify_patch", "handle_rejection", "__end__"]:
     status = state.get("status")
+    if status == "applied":
+        return "verify_patch"
     if status == "rejected":
         return "handle_rejection"
-    if status == "apply_failed":
-        return "__end__"
-    return "verify_patch"
+    return "__end__"
 
 
 def route_after_verify(state: AgentState) -> Literal["rollback_and_retry", "rollback_and_fail", "__end__"]:
@@ -108,6 +145,13 @@ def route_after_verify(state: AgentState) -> Literal["rollback_and_retry", "roll
         return "rollback_and_retry"
 
     return "rollback_and_fail"
+
+
+def route_after_rollback_and_retry(state: AgentState) -> Literal["analyze_evidence", "__end__"]:
+    # If rollback failed, terminate immediately to avoid modifying or diagnosing corrupted state
+    if state.get("status") == "rollback_failed":
+        return "__end__"
+    return "analyze_evidence"
 
 
 # ==============================================================================
@@ -125,6 +169,7 @@ def build_agent_graph(
 
     Args:
         checkpointer: State checkpointer for pausing and resuming across requests.
+                      Defaults to in-memory MemorySaver for local sessions.
         with_approval_interrupt: If True, halts immediately before apply_patch to await human approval.
 
     Returns:
@@ -204,8 +249,15 @@ def build_agent_graph(
         },
     )
 
-    # Bounded retry loop: route back to analyze_evidence
-    builder.add_edge("rollback_and_retry", "analyze_evidence")
+    # Bounded retry loop: route back to analyze_evidence only if rollback succeeded
+    builder.add_conditional_edges(
+        "rollback_and_retry",
+        route_after_rollback_and_retry,
+        {
+            "analyze_evidence": "analyze_evidence",
+            "__end__": END,
+        },
+    )
     builder.add_edge("rollback_and_fail", END)
 
     # Compile with checkpointing and approval interrupt

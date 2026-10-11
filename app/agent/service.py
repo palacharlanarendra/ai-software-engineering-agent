@@ -54,6 +54,7 @@ def _format_task_state(thread_id: str, state_values: dict, next_nodes: list[str]
             proposed_content=patch_data.get("proposed_content", ""),
             expected_original_checksum=patch_data.get("expected_original_checksum", ""),
             proposed_checksum=patch_data.get("proposed_checksum", ""),
+            file_existed_before=patch_data.get("file_existed_before", True),
         )
 
     verify_data = state_values.get("test_results")
@@ -139,6 +140,9 @@ def submit_approval(
     checkpoint = agent_graph.get_state(config)
     if not checkpoint or not checkpoint.values:
         raise KeyError(f"Task with thread_id '{thread_id}' not found.")
+
+    if approved and (not patch_id or not str(patch_id).strip()):
+        raise ValueError("Approval requires a non-empty patch_id matching the active proposal.")
 
     final_state = approve_and_resume_workflow(
         thread_id=thread_id,

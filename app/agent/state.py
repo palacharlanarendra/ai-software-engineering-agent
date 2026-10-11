@@ -11,6 +11,7 @@ class PatchProposal(TypedDict, total=False):
     proposed_content: str
     expected_original_checksum: str
     proposed_checksum: str
+    file_existed_before: bool
 
 
 class VerificationResult(TypedDict, total=False):
@@ -24,7 +25,7 @@ class VerificationResult(TypedDict, total=False):
 class AgentState(TypedDict, total=False):
     """
     Observable state schema for the Software Engineering Agent graph.
-    Tracks the full lifecycle from task intake through verification.
+    Tracks the full lifecycle from task intake through verification and rollback.
     """
     task: str
     retrieved_context: List[Dict[str, Any]]
@@ -35,8 +36,11 @@ class AgentState(TypedDict, total=False):
     human_feedback: Optional[str]
     patch_applied: bool
     original_file_content: Optional[str]
+    file_existed_before: Optional[bool]
+    expected_applied_checksum: Optional[str]
     test_results: Optional[VerificationResult]
     retry_count: int
     max_retries: int
     status: str
     errors: List[str]
+
