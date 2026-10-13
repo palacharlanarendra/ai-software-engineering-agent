@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Software Engineering Agent — Cloud IDE</title>
+    <title>Antigravity SWE Agent — Cloud IDE</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -17,12 +17,15 @@
         <div class="header-left">
             <div class="app-brand">
                 <span class="brand-icon">⚡</span>
-                <span class="brand-title">SWE Agent IDE</span>
-                <span class="badge badge-branch">version-3</span>
+                <span class="brand-title">Antigravity SWE IDE</span>
+                <span class="badge badge-branch">main</span>
             </div>
             <div class="header-divider"></div>
-            <div class="active-file-breadcrumb" id="active-breadcrumb">
-                <span class="folder-path">app /</span>
+            <div class="active-file-breadcrumb" id="active-breadcrumb" title="Click to reveal in explorer">
+                <span class="breadcrumb-root">ai-software-engineering-agent</span>
+                <span class="breadcrumb-sep">›</span>
+                <span class="folder-path">app</span>
+                <span class="breadcrumb-sep">›</span>
                 <span class="file-name" id="breadcrumb-filename">main.py</span>
             </div>
         </div>
@@ -37,10 +40,17 @@
                     <span class="status-dot dot-purple"></span>
                     <span class="pill-text">Gemini 2.5 Flash</span>
                 </div>
+                <div class="status-pill status-pill-clickable" id="git-status-pill" title="Click to view working tree changes">
+                    <span class="status-dot dot-amber" id="git-status-dot"></span>
+                    <span class="pill-text" id="git-status-text">Checking changes...</span>
+                </div>
             </div>
         </div>
 
         <div class="header-right">
+            <button class="btn btn-secondary btn-sm" id="btn-header-run-tests" title="Run full automated Pytest test suite">
+                <span class="icon">▶</span> Run Tests
+            </button>
             <button class="btn btn-secondary btn-sm" id="btn-reset-sandbox" title="Reset modified files to clean git commit">
                 <span class="icon">↺</span> Reset Sandbox
             </button>
@@ -52,35 +62,122 @@
 
     <!-- Main Workspace Container -->
     <main class="ide-workspace">
-        <!-- 1. Left Sidebar: File Explorer -->
+        <!-- 0. Left Activity Bar (VS Code / Antigravity styled) -->
+        <nav class="ide-activity-bar" id="activity-bar">
+            <div class="activity-top">
+                <button class="activity-btn active" id="act-btn-explorer" title="Explorer (Files Tree)">
+                    <span class="act-icon">📁</span>
+                    <span class="act-label">Files</span>
+                </button>
+                <button class="activity-btn" id="act-btn-changes" title="Source Control & Working Changes">
+                    <span class="act-icon">🔀</span>
+                    <span class="act-label">Changes</span>
+                    <span class="act-badge" id="changes-count-badge" style="display: none;">0</span>
+                </button>
+                <button class="activity-btn" id="act-btn-tests" title="Test Verification Runner">
+                    <span class="act-icon">🧪</span>
+                    <span class="act-label">Tests</span>
+                </button>
+                <button class="activity-btn" id="act-btn-agent" title="SWE Agent Copilot">
+                    <span class="act-icon">🤖</span>
+                    <span class="act-label">Agent</span>
+                </button>
+            </div>
+            <div class="activity-bottom">
+                <button class="activity-btn" id="act-btn-reset-side" title="Reset Sandbox to Git HEAD">
+                    <span class="act-icon">↺</span>
+                </button>
+            </div>
+        </nav>
+
+        <!-- 1. Left Sidebar: File Explorer & Source Control -->
         <aside class="sidebar-explorer" id="sidebar-explorer">
-            <div class="panel-header">
-                <span class="panel-title">EXPLORER</span>
-                <button class="btn-icon" id="btn-refresh-files" title="Refresh File Tree">⟳</button>
+            <!-- Explorer View Container -->
+            <div class="sidebar-view-pane active" id="pane-explorer">
+                <div class="panel-header">
+                    <span class="panel-title">EXPLORER</span>
+                    <div class="panel-actions">
+                        <button class="btn-icon" id="btn-collapse-all" title="Collapse All Folders in Explorer">⊟</button>
+                        <button class="btn-icon" id="btn-expand-all" title="Expand All Folders in Explorer">⊞</button>
+                        <button class="btn-icon" id="btn-refresh-files" title="Refresh File Tree & Git Status">⟳</button>
+                    </div>
+                </div>
+
+                <!-- Workspace Root Section Header -->
+                <div class="workspace-section-header" id="workspace-root-header">
+                    <div class="section-header-left">
+                        <span class="section-chevron" id="root-chevron">▾</span>
+                        <span class="section-title">ai-software-engineering-agent</span>
+                    </div>
+                    <span class="section-changes-badge" id="root-changes-badge" style="display: none;" title="Modified files in working tree">0 M</span>
+                </div>
+
+                <!-- Search Files Box -->
+                <div class="search-files-box">
+                    <div class="search-input-wrapper">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="file-search-input" placeholder="Search files... (e.g. main.py)">
+                        <button class="search-clear-btn" id="btn-clear-search" style="display: none;" title="Clear search">×</button>
+                    </div>
+                    <div class="search-match-info" id="search-match-info" style="display: none;">0 matches</div>
+                </div>
+
+                <!-- Working Changes Quick Pill in Explorer (Antigravity inspiration) -->
+                <div class="git-changes-quickbar" id="git-changes-quickbar" style="display: none;" title="Click to inspect all working tree diffs">
+                    <div class="quickbar-left">
+                        <span class="quickbar-icon">🔀</span>
+                        <span class="quickbar-label" id="quickbar-label">Working Changes</span>
+                    </div>
+                    <span class="quickbar-stat" id="quickbar-stat">+0 -0</span>
+                </div>
+
+                <!-- File Tree Container -->
+                <div class="file-tree-container" id="file-tree-container">
+                    <div class="tree-loading">Loading repository files...</div>
+                </div>
             </div>
-            <div class="search-files-box">
-                <input type="text" id="file-search-input" placeholder="Search files... (e.g. main.py)">
-            </div>
-            <div class="file-tree-container" id="file-tree-container">
-                <div class="tree-loading">Loading repository files...</div>
+
+            <!-- Source Control / Changes View Pane -->
+            <div class="sidebar-view-pane" id="pane-changes" style="display: none;">
+                <div class="panel-header">
+                    <span class="panel-title">SOURCE CONTROL</span>
+                    <div class="panel-actions">
+                        <button class="btn-icon" id="btn-refresh-git" title="Refresh Git Changes">⟳</button>
+                    </div>
+                </div>
+                <div class="changes-pane-header">
+                    <div class="changes-summary-line">
+                        <span class="changes-count-text" id="changes-pane-count">0 files changed</span>
+                        <span class="changes-stat-pills" id="changes-pane-stats">
+                            <span class="diff-add" id="pane-stat-add">+0</span>
+                            <span class="diff-del" id="pane-stat-del">-0</span>
+                        </span>
+                    </div>
+                </div>
+                <div class="changes-files-container" id="changes-files-container">
+                    <div class="tree-loading">No working changes detected.</div>
+                </div>
             </div>
         </aside>
 
         <!-- 2. Center Panel: Code Editor & Diff Viewer + Integrated Terminal -->
         <section class="editor-workspace">
             <div class="editor-tabbar">
-                <div class="tabs-container">
-                    <div class="tab-item active" id="current-file-tab">
+                <!-- Dynamic Multi-Tab Container -->
+                <div class="tabs-container" id="tabs-container">
+                    <div class="tab-item active" id="current-file-tab" data-path="app/main.py">
                         <span class="tab-icon">🐍</span>
                         <span class="tab-title" id="tab-filename">app/main.py</span>
+                        <span class="tab-status-dot" style="display: none;"></span>
+                        <button class="tab-close-btn" title="Close tab">×</button>
                     </div>
                 </div>
 
                 <div class="editor-mode-switch">
-                    <button class="mode-btn active" id="btn-view-code" data-mode="code">
+                    <button class="mode-btn active" id="btn-view-code" data-mode="code" title="View Source Code">
                         <span>📝 Code</span>
                     </button>
-                    <button class="mode-btn" id="btn-view-diff" data-mode="diff" disabled>
+                    <button class="mode-btn" id="btn-view-diff" data-mode="diff" disabled title="View Diff Comparison">
                         <span>⚡ Diff View</span>
                     </button>
                     <div class="diff-style-toggle" id="diff-style-toggle" style="display: none;">
@@ -100,6 +197,36 @@
             <div class="editor-viewport" id="editor-viewport">
                 <div id="monaco-code-container" class="monaco-wrapper"></div>
                 <div id="monaco-diff-container" class="monaco-wrapper" style="display: none;"></div>
+
+                <!-- Antigravity-Style Floating/Docked Changes Review Widget -->
+                <div class="antigravity-review-bar" id="antigravity-review-bar" style="display: none;">
+                    <div class="review-bar-header" id="review-bar-header">
+                        <div class="review-stat-summary">
+                            <span class="review-stat-icon">🔀</span>
+                            <span class="review-stat-text" id="review-stat-text">2 files changed <span class="diff-add">+11</span> <span class="diff-del">-2</span></span>
+                        </div>
+                        <div class="review-header-actions">
+                            <button class="review-mode-badge" id="btn-toggle-review-expand">
+                                <span id="review-expand-icon">▾</span> Review
+                            </button>
+                            <button class="review-close-btn" id="btn-close-review-bar" title="Close review bar">×</button>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible list of changed files -->
+                    <div class="review-files-list" id="review-files-list"></div>
+
+                    <!-- Action footer with Accept/Reject or Navigation -->
+                    <div class="review-bar-footer">
+                        <div class="review-footer-left">
+                            <span class="review-count-label" id="review-count-label">2 Files</span>
+                        </div>
+                        <div class="review-footer-right">
+                            <button class="btn btn-review-reject" id="btn-review-reject-all">Reject all</button>
+                            <button class="btn btn-review-accept" id="btn-review-accept-all">Accept all</button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Bottom Drawer: Integrated Terminal / Pytest Runner -->
@@ -113,24 +240,35 @@
                         <button class="drawer-tab" data-tab="agent-logs">
                             📋 Execution Trace
                         </button>
+                        <button class="drawer-tab" data-tab="git-changes">
+                            🔀 Git Working Changes
+                        </button>
                     </div>
                     <div class="drawer-controls">
+                        <button class="btn-drawer-action" id="btn-drawer-run-tests" title="Execute verification tests">
+                            <span>▶ Run Tests</span>
+                        </button>
                         <button class="btn-icon" id="btn-clear-console" title="Clear console">⊘</button>
                         <button class="btn-icon" id="btn-toggle-drawer" title="Toggle drawer size">▲</button>
                     </div>
                 </div>
                 <div class="drawer-body">
                     <div class="drawer-panel active" id="panel-test-results">
-                        <pre class="terminal-output" id="terminal-test-output">Pytest console idle. Run a task or approve a patch to trigger automated test verification.</pre>
+                        <pre class="terminal-output" id="terminal-test-output">Pytest console idle. Run a task, approve a patch, or click '▶ Run Tests' to trigger automated test verification.</pre>
                     </div>
                     <div class="drawer-panel" id="panel-agent-logs">
                         <pre class="terminal-output" id="terminal-agent-output">Agent execution logs will appear here during task processing.</pre>
+                    </div>
+                    <div class="drawer-panel" id="panel-git-changes">
+                        <div class="drawer-git-changes-list" id="drawer-git-changes-list">
+                            <div class="drawer-git-loading">Loading git changes...</div>
+                        </div>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- 3. Right Sidebar: Cursor / Devin Agent Copilot -->
+        <!-- 3. Right Sidebar: Antigravity / SWE Agent Copilot -->
         <aside class="sidebar-agent" id="sidebar-agent">
             <div class="panel-header agent-header">
                 <div class="agent-title-box">
