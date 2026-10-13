@@ -26,14 +26,26 @@ logger = logging.getLogger(__name__)
 
 def rollback_and_retry_node(state: AgentState) -> dict:
     """
-    Roll back previous patch before making a bounded retry attempt.
+    Roll back previous patch(es) before making a bounded retry attempt.
     Inspects rollback result; if rollback fails, halts retries immediately
     and marks state as rollback_failed.
     """
+    applied_patches = state.get("applied_patches")
     patch = state.get("patch")
     errors = list(state.get("errors", []))
 
-    if patch:
+    if applied_patches:
+        from app.agent.patch import rollback_multi_patch
+        success, rb_errs = rollback_multi_patch(applied_patches)
+        if not success:
+            for err in rb_errs:
+                errors.append(f"Rollback failed during retry: {err}")
+            return {
+                "status": "rollback_failed",
+                "patch_applied": True,
+                "errors": errors,
+            }
+    elif patch:
         success, err = rollback_patch(
             file_path=patch["file_path"],
             original_content=state.get("original_file_content"),
@@ -51,22 +63,37 @@ def rollback_and_retry_node(state: AgentState) -> dict:
     return {
         "retry_count": state.get("retry_count", 0) + 1,
         "patch_applied": False,
+        "applied_patches": [],
         "approval_status": "pending",
         "approved_patch_id": None,
         "patch": None,
+        "patches": [],
+        "bundle_patch_id": None,
         "status": "retrying",
     }
 
 
 def rollback_and_fail_node(state: AgentState) -> dict:
     """
-    Roll back modified file when verification fails and retries are exhausted.
+    Roll back modified file(s) when verification fails and retries are exhausted.
     If rollback fails, sets terminal status to rollback_failed.
     """
+    applied_patches = state.get("applied_patches")
     patch = state.get("patch")
     errors = list(state.get("errors", []))
 
-    if patch:
+    if applied_patches:
+        from app.agent.patch import rollback_multi_patch
+        success, rb_errs = rollback_multi_patch(applied_patches)
+        if not success:
+            for err in rb_errs:
+                errors.append(f"Rollback failed after verification failure: {err}")
+            return {
+                "status": "rollback_failed",
+                "patch_applied": True,
+                "errors": errors,
+            }
+    elif patch:
         success, err = rollback_patch(
             file_path=patch["file_path"],
             original_content=state.get("original_file_content"),
@@ -83,6 +110,7 @@ def rollback_and_fail_node(state: AgentState) -> dict:
 
     return {
         "patch_applied": False,
+        "applied_patches": [],
         "status": "verification_failed",
     }
 

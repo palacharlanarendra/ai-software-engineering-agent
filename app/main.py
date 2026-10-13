@@ -93,6 +93,17 @@ def get_health() -> HealthResponse:
 
 
 @app.get(
+    "/ping",
+    tags=["System"],
+    summary="Simple service ping",
+)
+def get_ping():
+    """Return simple health status including Qdrant connectivity."""
+    health = check_system_health()
+    return {"status": health.status, "qdrant_connected": health.qdrant_connected}
+
+
+@app.get(
     "/",
     tags=["System"],
     summary="Root service health status or Cloud IDE",

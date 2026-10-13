@@ -89,6 +89,28 @@ def retrieve_context_node(state: AgentState) -> Dict[str, Any]:
                 if snippets:
                     break
 
+    # Multi-file discovery: check if task explicitly references other repository files
+    try:
+        from app.tools.repository import list_files, read_file
+        repo_files = list_files()
+        already_covered_files = {s["file_path"] for s in snippets}
+        for rf in repo_files:
+            rf_name = rf.split("/")[-1]
+            if (rf in task or rf_name in task) and rf not in already_covered_files:
+                file_content = read_file(rf)
+                if file_content and not file_content.startswith("Access denied") and not file_content.startswith("file not found:"):
+                    lines = file_content.splitlines()
+                    snip_content = "\n".join(lines[:min(len(lines), 40)])
+                    snippets.append({
+                        "file_path": rf,
+                        "start_line": 1,
+                        "end_line": min(len(lines), 40),
+                        "content": snip_content,
+                        "score": 0.8,
+                    })
+    except Exception as exc:
+        logger.debug(f"Multi-file mention scan skipped: {exc}")
+
     if not snippets:
         return {
             "retrieved_context": [],
@@ -100,6 +122,7 @@ def retrieve_context_node(state: AgentState) -> Dict[str, Any]:
         "retrieved_context": snippets,
         "status": "retrieved",
     }
+
 
 
 def analyze_evidence_node(state: AgentState) -> Dict[str, Any]:
@@ -140,8 +163,9 @@ def analyze_evidence_node(state: AgentState) -> Dict[str, Any]:
 
 def propose_patch_node(state: AgentState) -> Dict[str, Any]:
     """
-    Generate structured patch proposal with unified diff, unique patch ID, and checksums.
-    Strictly validates target path, prevents overwriting on read failures, validates syntax,
+    Generate structured patch proposal across one or multiple files with unified diffs,
+    unique patch IDs, bundle checksum, and tamper-evident hashes.
+    Strictly validates target paths, prevents overwriting on read failures, validates syntax,
     and resets any stale approval state.
     """
     analysis = state.get("analysis") or {}
@@ -150,141 +174,160 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
     if not proposed_changes:
         return {
             "patch": None,
+            "patches": [],
+            "bundle_patch_id": None,
             "approval_status": "not_needed",
             "approved_patch_id": None,
             "status": "no_changes_needed",
         }
 
-    first_change = proposed_changes[0]
-    target_file = first_change.get("file_path", "")
-    description = first_change.get("description", "")
-    proposed_code = first_change.get("code_snippet", "")
-    original_snippet = first_change.get("original_snippet", "")
     errors = list(state.get("errors", []))
 
-    # 1. Validate target file path against security rules
-    is_valid_path, target_path, path_err = validate_target_path(target_file)
-    if not is_valid_path or target_path is None:
-        errors.append(path_err or f"Invalid target path: {target_file}")
+    # Group proposed changes by target file path for multi-edit aggregation
+    changes_by_file: dict[str, list[dict]] = {}
+    for change in proposed_changes:
+        fp = (change.get("file_path") or "").strip()
+        if fp:
+            changes_by_file.setdefault(fp, []).append(change)
+
+    if not changes_by_file:
         return {
             "patch": None,
+            "patches": [],
+            "bundle_patch_id": None,
+            "approval_status": "not_needed",
+            "approved_patch_id": None,
+            "status": "no_changes_needed",
+        }
+
+    patch_proposals: list[PatchProposal] = []
+    has_validation_failure = False
+
+    for target_file, file_changes in changes_by_file.items():
+        # 1. Validate target file path against security rules
+        is_valid_path, target_path, path_err = validate_target_path(target_file)
+        if not is_valid_path or target_path is None:
+            errors.append(path_err or f"Invalid target path: {target_file}")
+            has_validation_failure = True
+            break
+
+        # 2. Retrieve original file content safely
+        file_existed = target_path.exists()
+        orig_content = ""
+
+        if file_existed:
+            if not target_path.is_file():
+                errors.append(f"Cannot target non-file path: '{target_file}'")
+                has_validation_failure = True
+                break
+            try:
+                orig_content = target_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                errors.append(f"Failed to read existing file '{target_file}': {exc}")
+                has_validation_failure = True
+                break
+
+        # 3. Determine proposed content (supporting snippet-level replacements on existing files)
+        if file_existed:
+            proposed_content = orig_content
+            file_replacement_failed = False
+            for change in file_changes:
+                orig_snip = change.get("original_snippet") or ""
+                prop_snip = change.get("code_snippet") or ""
+
+                if orig_snip.strip():
+                    if orig_snip in proposed_content:
+                        proposed_content = proposed_content.replace(orig_snip, prop_snip, 1)
+                    elif orig_snip.strip() in proposed_content:
+                        proposed_content = proposed_content.replace(orig_snip.strip(), prop_snip.strip(), 1)
+                    else:
+                        errors.append(f"Target original_snippet not found in {target_file}")
+                        file_replacement_failed = True
+                        break
+                elif prop_snip and prop_snip != proposed_content:
+                    matched_ev = None
+                    for ev in analysis.get("evidence", []):
+                        ev_file = ev.get("file_path") if isinstance(ev, dict) else getattr(ev, "file_path", "")
+                        ev_snip = ev.get("snippet") if isinstance(ev, dict) else getattr(ev, "snippet", "")
+                        if ev_file == target_file and ev_snip and ev_snip.strip() in proposed_content:
+                            matched_ev = ev_snip.strip()
+                            break
+
+                    if matched_ev and len(prop_snip.splitlines()) < max(2, len(proposed_content.splitlines()) // 2):
+                        proposed_content = proposed_content.replace(matched_ev, prop_snip.strip(), 1)
+                    else:
+                        proposed_content = prop_snip
+                else:
+                    proposed_content = prop_snip
+
+            if file_replacement_failed:
+                has_validation_failure = True
+                break
+        else:
+            first_snip = file_changes[0].get("code_snippet", "")
+            proposed_content = first_snip if first_snip is not None else ""
+
+        # 4. Detect no-op proposals on existing files
+        if file_existed and proposed_content == orig_content:
+            continue
+
+        # 5. Strict syntax validation
+        syntax_err = validate_patch_syntax(proposed_content, target_file)
+        if syntax_err:
+            errors.append(syntax_err)
+            has_validation_failure = True
+            break
+
+        # 6. Generate unified diff and checksums
+        diff = create_unified_diff(orig_content, proposed_content, target_file)
+        orig_checksum = compute_content_checksum(orig_content)
+        prop_checksum = compute_content_checksum(proposed_content)
+        patch_id = create_patch_id(target_file, proposed_content, orig_checksum)
+
+        description = file_changes[0].get("description", "") or f"Update {target_file}"
+
+        patch_proposals.append({
+            "patch_id": patch_id,
+            "file_path": target_file,
+            "description": description,
+            "diff": diff,
+            "original_content": orig_content,
+            "proposed_content": proposed_content,
+            "expected_original_checksum": orig_checksum,
+            "proposed_checksum": prop_checksum,
+            "file_existed_before": file_existed,
+        })
+
+    if has_validation_failure:
+        return {
+            "patch": None,
+            "patches": [],
+            "bundle_patch_id": None,
             "approval_status": "not_needed",
             "approved_patch_id": None,
             "status": "failed",
             "errors": errors,
         }
 
-    # 2. Retrieve original file content safely, distinguishing nonexistent files from read failures
-    file_existed = target_path.exists()
-    orig_content = ""
-
-    if file_existed:
-        if not target_path.is_file():
-            errors.append(f"Cannot target non-file path: '{target_file}'")
-            return {
-                "patch": None,
-                "approval_status": "not_needed",
-                "approved_patch_id": None,
-                "status": "failed",
-                "errors": errors,
-            }
-        try:
-            orig_content = target_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            errors.append(f"Failed to read existing file '{target_file}': {exc}")
-            return {
-                "patch": None,
-                "approval_status": "not_needed",
-                "approved_patch_id": None,
-                "status": "failed",
-                "errors": errors,
-            }
-
-    # 3. Determine proposed content (supporting snippet-level replacement on existing files)
-    file_changes = [c for c in proposed_changes if c.get("file_path") == target_file] or [first_change]
-    if file_existed:
-        proposed_content = orig_content
-        for change in file_changes:
-            orig_snip = change.get("original_snippet") or ""
-            prop_snip = change.get("code_snippet") or ""
-
-            if orig_snip.strip():
-                if orig_snip in proposed_content:
-                    proposed_content = proposed_content.replace(orig_snip, prop_snip, 1)
-                elif orig_snip.strip() in proposed_content:
-                    proposed_content = proposed_content.replace(orig_snip.strip(), prop_snip.strip(), 1)
-                else:
-                    errors.append(f"Target original_snippet not found in {target_file}")
-                    return {
-                        "patch": None,
-                        "approval_status": "not_needed",
-                        "approved_patch_id": None,
-                        "status": "failed",
-                        "errors": errors,
-                    }
-            elif prop_snip and prop_snip != proposed_content:
-                # Fallback: check if proposed_code is a snippet and evidence provides matching original lines
-                matched_ev = None
-                for ev in analysis.get("evidence", []):
-                    ev_file = ev.get("file_path") if isinstance(ev, dict) else getattr(ev, "file_path", "")
-                    ev_snip = ev.get("snippet") if isinstance(ev, dict) else getattr(ev, "snippet", "")
-                    if ev_file == target_file and ev_snip and ev_snip.strip() in proposed_content:
-                        matched_ev = ev_snip.strip()
-                        break
-
-                if matched_ev and len(prop_snip.splitlines()) < max(2, len(proposed_content.splitlines()) // 2):
-                    proposed_content = proposed_content.replace(matched_ev, prop_snip.strip(), 1)
-                else:
-                    proposed_content = prop_snip
-            else:
-                proposed_content = prop_snip
-    else:
-        proposed_content = proposed_code if proposed_code is not None else ""
-
-    # 4. Detect no-op proposals on existing files
-    if file_existed and proposed_content == orig_content:
+    if not patch_proposals:
         return {
             "patch": None,
+            "patches": [],
+            "bundle_patch_id": None,
             "approval_status": "not_needed",
             "approved_patch_id": None,
             "status": "no_changes_needed",
             "errors": errors,
         }
 
-    # 5. Strict syntax validation: if invalid, do NOT produce an approvable patch
-    syntax_err = validate_patch_syntax(proposed_content, target_file)
-    if syntax_err:
-        errors.append(syntax_err)
-        return {
-            "patch": None,
-            "approval_status": "not_needed",
-            "approved_patch_id": None,
-            "status": "failed",
-            "errors": errors,
-        }
-
-    # 6. Generate unified diff
-    diff = create_unified_diff(orig_content, proposed_content, target_file)
-
-    # 6. Generate deterministic full-SHA256 patch ID and checksums
-    orig_checksum = compute_content_checksum(orig_content)
-    prop_checksum = compute_content_checksum(proposed_content)
-    patch_id = create_patch_id(target_file, proposed_content, orig_checksum)
-
-    patch_proposal: PatchProposal = {
-        "patch_id": patch_id,
-        "file_path": target_file,
-        "description": description,
-        "diff": diff,
-        "original_content": orig_content,
-        "proposed_content": proposed_content,
-        "expected_original_checksum": orig_checksum,
-        "proposed_checksum": prop_checksum,
-        "file_existed_before": file_existed,
-    }
+    from app.agent.patch import create_bundle_patch_id
+    bundle_id = create_bundle_patch_id(patch_proposals)
+    primary_patch = patch_proposals[0]
 
     return {
-        "patch": patch_proposal,
+        "patch": primary_patch,
+        "patches": patch_proposals,
+        "bundle_patch_id": bundle_id,
         "approval_status": "pending",
         "approved_patch_id": None,  # Always reset approval state on fresh proposal
         "status": "awaiting_approval",
@@ -295,10 +338,12 @@ def propose_patch_node(state: AgentState) -> Dict[str, Any]:
 def apply_patch_node(state: AgentState) -> Dict[str, Any]:
     """
     Apply approved patch to disk only after strict human approval validation
-    and complete proposal integrity verification.
+    and complete proposal integrity verification across all target files in changeset.
     """
     approval = state.get("approval_status", "")
-    patch = state.get("patch")
+    patches = state.get("patches")
+    if not patches and state.get("patch"):
+        patches = [state["patch"]]
 
     if approval != "approved":
         return {
@@ -306,7 +351,7 @@ def apply_patch_node(state: AgentState) -> Dict[str, Any]:
             "patch_applied": False,
         }
 
-    if not patch:
+    if not patches:
         return {
             "status": "failed",
             "errors": state.get("errors", []) + ["No patch proposal available to apply."],
@@ -325,63 +370,79 @@ def apply_patch_node(state: AgentState) -> Dict[str, Any]:
             ],
         }
 
-    # 2. Require approved_patch_id to match active patch ID exactly
-    active_patch_id = patch.get("patch_id", "")
-    if approved_id != active_patch_id:
+    # 2. Check approval match: can approve bundle_patch_id or matching individual patch_id
+    bundle_id = state.get("bundle_patch_id")
+    all_patch_ids = [p.get("patch_id") for p in patches if p.get("patch_id")]
+    primary_patch_id = patches[0].get("patch_id") if patches else ""
+
+    approved_match = (
+        approved_id == bundle_id or
+        approved_id == primary_patch_id or
+        approved_id in all_patch_ids
+    )
+
+    if not approved_match:
         return {
             "status": "rejected",
             "patch_applied": False,
             "errors": state.get("errors", []) + [
-                f"Patch mismatch: approved ID '{approved_id}' does not match active patch '{active_patch_id}'."
+                f"Patch mismatch: approved ID '{approved_id}' does not match active patch '{primary_patch_id}'."
             ],
         }
 
-    # 3. Bind approval to complete proposal integrity: recompute patch ID and checksums
-    target_file = patch.get("file_path", "")
-    proposed_content = patch.get("proposed_content", "")
-    expected_orig_checksum = patch.get("expected_original_checksum")
-    expected_prop_checksum = patch.get("proposed_checksum")
+    # 3. Bind approval to proposal integrity: verify checksums and patch IDs of all patches
+    for patch in patches:
+        target_file = patch.get("file_path", "")
+        proposed_content = patch.get("proposed_content", "")
+        expected_orig_checksum = patch.get("expected_original_checksum")
+        expected_prop_checksum = patch.get("proposed_checksum")
+        active_id = patch.get("patch_id", "")
 
-    computed_prop_checksum = compute_content_checksum(proposed_content)
-    if expected_prop_checksum and computed_prop_checksum != expected_prop_checksum:
-        return {
-            "status": "failed",
-            "patch_applied": False,
-            "errors": state.get("errors", []) + [
-                "Proposal tampering detected: proposed content does not match recorded checksum."
-            ],
-        }
+        computed_prop_checksum = compute_content_checksum(proposed_content)
+        if expected_prop_checksum and computed_prop_checksum != expected_prop_checksum:
+            return {
+                "status": "failed",
+                "patch_applied": False,
+                "errors": state.get("errors", []) + [
+                    f"Proposal tampering detected: proposed content does not match recorded checksum for {target_file}."
+                ],
+            }
 
-    computed_patch_id = create_patch_id(target_file, proposed_content, expected_orig_checksum)
-    if computed_patch_id != active_patch_id:
-        return {
-            "status": "failed",
-            "patch_applied": False,
-            "errors": state.get("errors", []) + [
-                "Proposal tampering detected: patch ID does not match computed digest of target path and content."
-            ],
-        }
+        computed_patch_id = create_patch_id(target_file, proposed_content, expected_orig_checksum)
+        if computed_patch_id != active_id:
+            return {
+                "status": "failed",
+                "patch_applied": False,
+                "errors": state.get("errors", []) + [
+                    f"Proposal tampering detected: patch ID does not match computed digest of target path and content for {target_file}."
+                ],
+            }
 
-    # 4. Revalidate and apply safely with atomic replacement
-    res = apply_patch_safely(
-        file_path=target_file,
-        proposed_content=proposed_content,
-        expected_original_checksum=expected_orig_checksum,
-    )
-
-    if not res.success:
+    # 4. Safely apply all patches transactionally
+    from app.agent.patch import apply_multi_patch_safely
+    success, applied_records, err_msg = apply_multi_patch_safely(patches)
+    if not success:
         return {
             "status": "apply_failed",
             "patch_applied": False,
-            "errors": state.get("errors", []) + [res.error_message or "Failed to write patch."],
+            "errors": state.get("errors", []) + [err_msg or "Failed to write patch."],
         }
+
+    first_rec = applied_records[0] if applied_records else {}
+    orig_contents_map = {r["file_path"]: r["original_content"] for r in applied_records}
+    existed_map = {r["file_path"]: r["file_existed_before"] for r in applied_records}
+    checksums_map = {r["file_path"]: r["applied_checksum"] for r in applied_records}
 
     return {
         "status": "applied",
         "patch_applied": True,
-        "original_file_content": res.original_content,
-        "file_existed_before": res.file_existed_before,
-        "expected_applied_checksum": computed_prop_checksum,
+        "applied_patches": applied_records,
+        "original_file_content": first_rec.get("original_content"),
+        "file_existed_before": first_rec.get("file_existed_before", True),
+        "expected_applied_checksum": first_rec.get("applied_checksum"),
+        "original_file_contents": orig_contents_map,
+        "files_existed_before": existed_map,
+        "expected_applied_checksums": checksums_map,
     }
 
 

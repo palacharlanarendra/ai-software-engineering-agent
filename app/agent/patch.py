@@ -45,6 +45,25 @@ def create_patch_id(
     return f"patch-{digest}"
 
 
+def create_bundle_patch_id(patches_or_ids: list) -> str:
+    """
+    Generate a unique, deterministic aggregate bundle patch ID from a collection of
+    patch proposals or patch IDs.
+    """
+    ids = []
+    for item in patches_or_ids:
+        if isinstance(item, dict):
+            pid = item.get("patch_id", "")
+            if pid:
+                ids.append(pid)
+        elif isinstance(item, str) and item:
+            ids.append(item)
+    seed = ":".join(sorted(ids)) if ids else str(uuid.uuid4())
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"bundle-{digest}"
+
+
+
 def create_unified_diff(
     original: str,
     proposed: str,
@@ -308,3 +327,109 @@ def rollback_patch(
         return True, None
     except OSError as exc:
         return False, f"Rollback error: failed to restore original content to '{file_path}': {exc}"
+
+
+def apply_multi_patch_safely(
+    patches: list,
+) -> Tuple[bool, list, Optional[str]]:
+    """
+    Safely apply multiple file patches.
+    Validates all files first. If any file fails to validate or write,
+    all successfully written files in this batch are rolled back immediately.
+
+    Returns:
+        (success: bool, applied_records: list[dict], error_message: Optional[str])
+    """
+    if not patches:
+        return False, [], "No patches provided to apply."
+
+    applied_records = []
+    # Phase 1: Pre-validation of all patches before applying any writes
+    for p in patches:
+        file_path = p.get("file_path", "")
+        proposed_content = p.get("proposed_content", "")
+        expected_orig_checksum = p.get("expected_original_checksum")
+
+        valid_path, target_path, err = validate_target_path(file_path)
+        if not valid_path or target_path is None:
+            return False, [], f"Validation error for '{file_path}': {err}"
+
+        syntax_err = validate_patch_syntax(proposed_content, file_path)
+        if syntax_err:
+            return False, [], f"Syntax error for '{file_path}': {syntax_err}"
+
+        if target_path.exists():
+            if not target_path.is_file():
+                return False, [], f"Target path '{file_path}' is not a regular file."
+            if expected_orig_checksum:
+                try:
+                    curr_content = target_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    return False, [], f"Failed to read existing file '{file_path}': {exc}"
+                curr_checksum = compute_content_checksum(curr_content)
+                if curr_checksum != expected_orig_checksum:
+                    return False, [], (
+                        f"Conflict detected for '{file_path}': disk content was modified after proposal."
+                    )
+        else:
+            if expected_orig_checksum:
+                empty_checksum = compute_content_checksum("")
+                if expected_orig_checksum != empty_checksum:
+                    return False, [], (
+                        f"Conflict detected for '{file_path}': expected checksum does not match nonexistent file."
+                    )
+
+    # Phase 2: Atomic writes with automatic rollback on partial failure
+    for p in patches:
+        file_path = p.get("file_path", "")
+        proposed_content = p.get("proposed_content", "")
+        expected_orig_checksum = p.get("expected_original_checksum")
+
+        res = apply_patch_safely(
+            file_path=file_path,
+            proposed_content=proposed_content,
+            expected_original_checksum=expected_orig_checksum,
+        )
+        if not res.success:
+            # Rollback any already applied patches in this transaction
+            rollback_multi_patch(applied_records)
+            return False, [], f"Failed applying patch to '{file_path}': {res.error_message}"
+
+        applied_records.append({
+            "file_path": file_path,
+            "original_content": res.original_content,
+            "file_existed_before": res.file_existed_before,
+            "applied_checksum": compute_content_checksum(proposed_content),
+        })
+
+    return True, applied_records, None
+
+
+def rollback_multi_patch(
+    applied_records: list,
+) -> Tuple[bool, list]:
+    """
+    Roll back a batch of applied patch records in reverse order.
+    Returns:
+        (all_succeeded: bool, list_of_error_messages: list[str])
+    """
+    all_success = True
+    errors = []
+    for rec in reversed(applied_records):
+        file_path = rec.get("file_path", "")
+        orig_content = rec.get("original_content")
+        existed_before = rec.get("file_existed_before", True)
+        applied_checksum = rec.get("applied_checksum")
+
+        ok, err = rollback_patch(
+            file_path=file_path,
+            original_content=orig_content,
+            file_existed_before=existed_before,
+            expected_applied_checksum=applied_checksum,
+        )
+        if not ok:
+            all_success = False
+            errors.append(f"{file_path}: {err}")
+
+    return all_success, errors
+
