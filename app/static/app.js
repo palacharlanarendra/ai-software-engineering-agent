@@ -11,11 +11,14 @@ const state = {
     diffSplitMode: true, // true = side-by-side, false = inline
     activeThreadId: null,
     activePatchId: null,
+    activePatches: [], // Multi-edit changeset patches
+    selectedPatchIndex: 0,
     editorInstance: null,
     diffEditorInstance: null,
     allFiles: [],
     monacoReady: false,
 };
+
 
 // ==============================================================================
 // 1. Monaco Editor Initialization
@@ -206,6 +209,36 @@ function switchEditorMode(mode) {
     }
 }
 
+function renderDiffForPatch(patchIndex) {
+    if (!state.activePatches || !state.activePatches[patchIndex]) return;
+    state.selectedPatchIndex = patchIndex;
+    const currentPatch = state.activePatches[patchIndex];
+
+    const origContent = currentPatch.original_content || "";
+    const propContent = currentPatch.proposed_content || "";
+    const lang = getLanguageForFile(currentPatch.file_path);
+
+    const origModel = monaco.editor.createModel(origContent, lang);
+    const propModel = monaco.editor.createModel(propContent, lang);
+    state.diffEditorInstance.setModel({ original: origModel, modified: propModel });
+
+    // Highlight active diff file tab button
+    document.querySelectorAll('.diff-file-tab-btn').forEach((btn, idx) => {
+        if (idx === patchIndex) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+
+    // Update active tab title
+    const tabTitle = document.getElementById('tab-filename');
+    if (tabTitle) {
+        tabTitle.textContent = currentPatch.file_path + " (Diff)";
+    }
+}
+
+
 // ==============================================================================
 // 3. System Health Checks
 // ==============================================================================
@@ -352,23 +385,43 @@ function handleTaskStateResponse(taskState) {
         });
     }
 
-    if (taskState.status === "awaiting_approval" && patch) {
-        state.activePatchId = patch.patch_id;
+    const patches = (taskState.patches && taskState.patches.length > 0) ? taskState.patches : (patch ? [patch] : []);
+
+    if (taskState.status === "awaiting_approval" && patches.length > 0) {
+        state.activePatches = patches;
+        state.activePatchId = taskState.bundle_patch_id || patch.patch_id || patches[0].patch_id;
 
         badge.className = 'status-badge badge-awaiting';
         badge.textContent = "AWAITING APPROVAL";
-        statusLabel.textContent = "Patch ready. Review diff to approve.";
+        const fileCountText = patches.length > 1 ? `${patches.length} files proposed` : "1 file proposed";
+        statusLabel.textContent = `Patch ready (${fileCountText}). Review diffs to approve.`;
 
-        // Update Monaco Diff View
-        const origContent = patch.original_content || "";
-        const propContent = patch.proposed_content || "";
-        const lang = getLanguageForFile(patch.file_path);
+        // Configure multi-file diff tab bar
+        const diffTabsBar = document.getElementById('diff-file-tabs');
+        const diffTabsList = document.getElementById('diff-tabs-list');
 
-        const origModel = monaco.editor.createModel(origContent, lang);
-        const propModel = monaco.editor.createModel(propContent, lang);
-        state.diffEditorInstance.setModel({ original: origModel, modified: propModel });
+        if (diffTabsBar && diffTabsList) {
+            if (patches.length > 1) {
+                diffTabsBar.style.display = 'flex';
+                diffTabsList.innerHTML = '';
+                patches.forEach((p, idx) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'diff-file-tab-btn' + (idx === 0 ? ' active' : '');
+                    btn.innerHTML = `${getIconForFile(p.file_path)} <span>${p.file_path}</span>`;
+                    btn.addEventListener('click', () => {
+                        renderDiffForPatch(idx);
+                    });
+                    diffTabsList.appendChild(btn);
+                });
+            } else {
+                diffTabsBar.style.display = 'none';
+            }
+        }
 
-        // Enable diff button and switch to diff view automatically!
+        // Render first patch diff
+        renderDiffForPatch(0);
+
+        // Enable diff button and switch to diff view automatically
         const btnDiff = document.getElementById('btn-view-diff');
         btnDiff.disabled = false;
         switchEditorMode('diff');
@@ -376,11 +429,13 @@ function handleTaskStateResponse(taskState) {
         // Show Approval Gate banner
         const gate = document.getElementById('approval-gate-banner');
         gate.style.display = 'block';
-        document.getElementById('gate-patch-id').textContent = patch.patch_id;
+        const displayTag = patches.length > 1 ? `${state.activePatchId} (${patches.length} files)` : state.activePatchId;
+        document.getElementById('gate-patch-id').textContent = displayTag;
 
-        showToast("Patch proposal generated! Review the diff.", "info");
+        showToast(`Patch proposal generated for ${patches.length} file(s)! Review diffs.`, "info");
 
     } else if (taskState.status === "no_changes_needed") {
+
         badge.className = 'status-badge badge-idle';
         badge.textContent = "NO CHANGES";
         statusLabel.textContent = "No code changes needed";
@@ -493,18 +548,27 @@ async function submitApproval(approved) {
 
             showToast("Patch applied! Tests passed successfully.", "success");
 
-            // Refresh active file on disk into Monaco Editor so the user sees the real change!
+            // Hide diff tabs bar and refresh active file on disk into Monaco Editor
+            const diffTabsBar = document.getElementById('diff-file-tabs');
+            if (diffTabsBar) diffTabsBar.style.display = 'none';
+
+            loadFilesList();
             setTimeout(() => {
                 loadFileContent(state.currentFilePath);
             }, 500);
 
         } else if (!approved) {
+            const diffTabsBar = document.getElementById('diff-file-tabs');
+            if (diffTabsBar) diffTabsBar.style.display = 'none';
             badge.className = 'status-badge badge-idle';
             badge.textContent = "REJECTED";
             statusLabel.textContent = "Patch was rejected by operator";
             showToast("Patch proposal rejected.", "info");
             switchEditorMode('code');
         } else {
+            const diffTabsBar = document.getElementById('diff-file-tabs');
+            if (diffTabsBar) diffTabsBar.style.display = 'none';
+
             badge.className = 'status-badge badge-failed';
             badge.textContent = "TESTS FAILED";
             statusLabel.textContent = "Tests failed. Patch rolled back.";

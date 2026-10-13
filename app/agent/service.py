@@ -42,6 +42,24 @@ def check_system_health() -> HealthResponse:
 
 def _format_task_state(thread_id: str, state_values: dict, next_nodes: list[str]) -> TaskStateResponse:
     """Format LangGraph state dictionary into typed TaskStateResponse schema."""
+    patches_list = state_values.get("patches") or []
+    patches_models = []
+    for p in patches_list:
+        if isinstance(p, dict):
+            patches_models.append(
+                PatchProposalResponse(
+                    patch_id=p.get("patch_id", ""),
+                    file_path=p.get("file_path", ""),
+                    description=p.get("description", ""),
+                    diff=p.get("diff", ""),
+                    original_content=p.get("original_content", ""),
+                    proposed_content=p.get("proposed_content", ""),
+                    expected_original_checksum=p.get("expected_original_checksum", ""),
+                    proposed_checksum=p.get("proposed_checksum", ""),
+                    file_existed_before=p.get("file_existed_before", True),
+                )
+            )
+
     patch_data = state_values.get("patch")
     patch_model = None
     if patch_data and isinstance(patch_data, dict):
@@ -56,6 +74,8 @@ def _format_task_state(thread_id: str, state_values: dict, next_nodes: list[str]
             proposed_checksum=patch_data.get("proposed_checksum", ""),
             file_existed_before=patch_data.get("file_existed_before", True),
         )
+    elif patches_models:
+        patch_model = patches_models[0]
 
     verify_data = state_values.get("test_results")
     verify_model = None
@@ -75,6 +95,8 @@ def _format_task_state(thread_id: str, state_values: dict, next_nodes: list[str]
         next_nodes=next_nodes,
         patch_applied=state_values.get("patch_applied", False),
         patch=patch_model,
+        patches=patches_models,
+        bundle_patch_id=state_values.get("bundle_patch_id"),
         test_results=verify_model,
         retry_count=state_values.get("retry_count", 0),
         errors=state_values.get("errors", []),
@@ -120,11 +142,20 @@ def get_task(thread_id: str) -> TaskStateResponse:
 
 
 def get_task_proposal(thread_id: str) -> PatchProposalResponse:
-    """Retrieve the pending structured patch proposal for inspection."""
+    """Retrieve the primary pending structured patch proposal for inspection."""
     task_state = get_task(thread_id)
     if not task_state.patch:
         raise LookupError(f"No patch proposal exists for task '{thread_id}'.")
     return task_state.patch
+
+
+def get_task_proposals(thread_id: str) -> list[PatchProposalResponse]:
+    """Retrieve all pending structured patch proposals across files in a multi-edit changeset."""
+    task_state = get_task(thread_id)
+    if not task_state.patches and not task_state.patch:
+        raise LookupError(f"No patch proposals exist for task '{thread_id}'.")
+    return task_state.patches or ([task_state.patch] if task_state.patch else [])
+
 
 
 def submit_approval(

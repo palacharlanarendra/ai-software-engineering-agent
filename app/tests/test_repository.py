@@ -217,3 +217,40 @@ class TestRepositoryIntegration:
         assert "app/tools/repository.py" in files
         assert not any(".git" in f.split("/") for f in files)
         assert not any(f.endswith(".env") for f in files)
+
+    def test_read_file_with_line_range(self, repo_dir):
+        sample = repo_dir / "sample_range.py"
+        sample.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+        out = read_file("sample_range.py", start_line=2, end_line=4)
+        assert out == "line2\nline3\nline4\n"
+
+    def test_list_files_with_directory_filter(self, repo_dir):
+        files = list_files("src")
+        assert "src/app.py" in files
+        assert "src/utils.py" in files
+        assert "main.py" not in files
+
+    def test_inspect_symbols_extracts_ast_elements(self, repo_dir):
+        from app.tools.repository import inspect_symbols
+        code_file = repo_dir / "inspectable.py"
+        code_file.write_text(
+            "import os\n"
+            "from typing import List\n\n"
+            "def calculate(a: int, b: int):\n    return a + b\n\n"
+            "class Engine:\n    def start(self):\n        pass\n",
+            encoding="utf-8",
+        )
+        res = inspect_symbols("inspectable.py")
+        assert "symbols" in res
+        names = [s["name"] for s in res["symbols"]]
+        assert "calculate" in names
+        assert "Engine" in names
+
+    def test_find_references_finds_usages(self, repo_dir):
+        from app.tools.repository import find_references
+        ref_file = repo_dir / "usage.py"
+        ref_file.write_text("result = calculate(1, 2)\n", encoding="utf-8")
+        refs = find_references("calculate")
+        assert len(refs) >= 1
+        assert any(r["file"] == "usage.py" for r in refs)
+

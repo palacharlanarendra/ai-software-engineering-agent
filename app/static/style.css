@@ -1056,3 +1056,59 @@ body.vscode-theme {
 ::-webkit-scrollbar-thumb:hover {
     background: #3b4d75;
 }
+
+/* Multi-File Changeset Diff Selector Tabs */
+.diff-file-tabs {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 16px;
+    background-color: #11151f;
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-x: auto;
+}
+
+.diff-tabs-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.diff-tabs-list {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+}
+
+.diff-file-tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #182030;
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.diff-file-tab-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--border-medium);
+}
+
+.diff-file-tab-btn.active {
+    background-color: rgba(59, 130, 246, 0.2);
+    border-color: var(--accent-blue);
+    color: #93c5fd;
+    font-weight: 600;
+}
+

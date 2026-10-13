@@ -14,8 +14,10 @@ from app.agent.service import (
     submit_task,
     get_task,
     get_task_proposal,
+    get_task_proposals,
     submit_approval,
 )
+from app.agent.tools import ALL_AGENT_TOOLS
 from app.schemas import (
     HealthResponse,
     ChatRequest,
@@ -149,6 +151,113 @@ def get_file_content(path: str):
     return {"path": path, "content": content}
 
 
+@app.get("/api/git/changes", tags=["IDE"], summary="List git working tree changes and stats")
+def get_git_changes_endpoint():
+    """List modified, added, and deleted files with diff stats from git working tree."""
+    try:
+        p_status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        p_numstat = subprocess.run(
+            ["git", "diff", "HEAD", "--numstat"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+        )
+    except Exception as e:
+        logger.warning(f"Error checking git status: {e}")
+        return {"changes": [], "total_additions": 0, "total_deletions": 0, "total_files": 0}
+
+    stats = {}
+    for line in p_numstat.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) >= 3:
+            adds = int(parts[0]) if parts[0].isdigit() else 0
+            dels = int(parts[1]) if parts[1].isdigit() else 0
+            stats[parts[2]] = (adds, dels)
+
+    changes = []
+    tot_adds = 0
+    tot_dels = 0
+    for line in p_status.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        status_code = line[:2].strip()
+        file_path = line[3:].strip().strip('"')
+        adds, dels = stats.get(file_path, (0, 0))
+        tot_adds += adds
+        tot_dels += dels
+        changes.append({
+            "path": file_path,
+            "status": status_code or "M",
+            "additions": adds,
+            "deletions": dels,
+        })
+
+    return {
+        "changes": changes,
+        "total_additions": tot_adds,
+        "total_deletions": tot_dels,
+        "total_files": len(changes),
+    }
+
+
+@app.get("/api/git/diff", tags=["IDE"], summary="Get file diff against git HEAD")
+def get_git_diff_endpoint(path: str):
+    """Retrieve original content from HEAD and current modified content for diff comparison."""
+    root = PROJECT_ROOT.resolve()
+    target = (root / path).resolve()
+    if root not in target.parents and target != root:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    show_proc = subprocess.run(
+        ["git", "show", f"HEAD:{path}"],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    orig = show_proc.stdout if show_proc.returncode == 0 else ""
+
+    curr = ""
+    if target.exists() and target.is_file():
+        try:
+            curr = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            curr = ""
+
+    diff_proc = subprocess.run(
+        ["git", "diff", "HEAD", "--", path],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    diff_str = diff_proc.stdout
+
+    return {
+        "path": path,
+        "original_content": orig,
+        "modified_content": curr,
+        "diff": diff_str,
+    }
+
+
+@app.post("/api/run-tests", tags=["IDE"], summary="Execute automated pytest test suite on demand")
+def run_tests_endpoint(target: str = "app/tests/"):
+    """Execute pytest test suite on demand and return captured output."""
+    from app.agent.verifier import run_verification_tests
+    result = run_verification_tests(test_target=target)
+    return {
+        "passed": result.passed,
+        "exit_code": result.exit_code,
+        "output": result.output,
+        "test_target": result.test_target,
+    }
+
+
 @app.post("/api/reset", tags=["IDE"], summary="Reset repository sandbox to clean git commit")
 def reset_demo_sandbox():
     """Revert files to git clean state for demo visitors."""
@@ -278,6 +387,38 @@ def get_task_status(thread_id: str) -> TaskStateResponse:
 def get_task_proposal_endpoint(thread_id: str) -> PatchProposalResponse:
     """Inspect structured patch proposal before deciding to approve or reject."""
     return get_task_proposal(thread_id)
+
+
+@app.get(
+    "/task/{thread_id}/proposals",
+    response_model=list[PatchProposalResponse],
+    tags=["Tasks"],
+    summary="Inspect all proposed patch diffs across files in a multi-edit changeset",
+    responses={
+        404: {"model": ErrorResponse, "description": "Task or proposal not found"},
+    },
+)
+@app.get(
+    "/tasks/{thread_id}/proposals",
+    response_model=list[PatchProposalResponse],
+    include_in_schema=False,
+)
+def get_task_proposals_endpoint(thread_id: str) -> list[PatchProposalResponse]:
+    """Inspect all structured patch proposals in a multi-file changeset."""
+    return get_task_proposals(thread_id)
+
+
+@app.get("/api/tools", tags=["Tools"], summary="List available agent repository tools")
+def get_available_tools():
+    """List tools available to the AI Software Engineering Agent for repository exploration."""
+    return [
+        {
+            "name": t.name,
+            "description": t.description,
+        }
+        for t in ALL_AGENT_TOOLS
+    ]
+
 
 
 @app.post(

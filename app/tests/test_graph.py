@@ -941,3 +941,208 @@ class TestGraphWorkflow:
             assert res["status"] == "verification_failed"
             assert not res["test_results"]["passed"]
             assert "Subprocess crashed" in res["test_results"]["output"]
+
+
+# ==============================================================================
+# Multi-Edit Patching & Workflow Unit Tests
+# ==============================================================================
+
+
+class TestMultiEditWorkflow:
+    def test_create_bundle_patch_id_deterministic(self):
+        from app.agent.patch import create_bundle_patch_id
+        patches = [{"patch_id": "patch-aaa"}, {"patch_id": "patch-bbb"}]
+        reversed_patches = [{"patch_id": "patch-bbb"}, {"patch_id": "patch-aaa"}]
+        id1 = create_bundle_patch_id(patches)
+        id2 = create_bundle_patch_id(reversed_patches)
+        assert id1 == id2
+        assert id1.startswith("bundle-")
+
+    def test_propose_patch_node_generates_multi_file_patch_bundle(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        file1 = tmp_path / "routes.py"
+        file1.write_text("def ping(): return 'pong'\n", encoding="utf-8")
+        file2 = tmp_path / "models.py"
+        file2.write_text("class OldModel: pass\n", encoding="utf-8")
+
+        state = {
+            "analysis": {
+                "proposed_changes": [
+                    {
+                        "file_path": "routes.py",
+                        "description": "Add health route",
+                        "original_snippet": "def ping(): return 'pong'\n",
+                        "code_snippet": "def ping(): return 'pong'\ndef health(): return 'ok'\n",
+                    },
+                    {
+                        "file_path": "models.py",
+                        "description": "Add new model",
+                        "original_snippet": "class OldModel: pass\n",
+                        "code_snippet": "class OldModel: pass\nclass NewModel: pass\n",
+                    },
+                ]
+            }
+        }
+
+        res = propose_patch_node(state)
+        assert res["status"] == "awaiting_approval"
+        assert res["approval_status"] == "pending"
+        assert len(res["patches"]) == 2
+        assert res["bundle_patch_id"] is not None
+        assert res["bundle_patch_id"].startswith("bundle-")
+
+        # Primary patch compatibility
+        assert res["patch"]["file_path"] == "routes.py"
+        assert res["patches"][1]["file_path"] == "models.py"
+
+        # Check diffs
+        assert "+def health(): return 'ok'" in res["patches"][0]["diff"]
+        assert "+class NewModel: pass" in res["patches"][1]["diff"]
+
+    def test_apply_patch_node_applies_all_files_when_bundle_id_approved(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        file1 = tmp_path / "service.py"
+        file1.write_text("ALPHA = 1\n", encoding="utf-8")
+        file2 = tmp_path / "handler.py"
+        file2.write_text("BETA = 2\n", encoding="utf-8")
+
+        state = {
+            "analysis": {
+                "proposed_changes": [
+                    {
+                        "file_path": "service.py",
+                        "description": "Update ALPHA",
+                        "code_snippet": "ALPHA = 10\n",
+                    },
+                    {
+                        "file_path": "handler.py",
+                        "description": "Update BETA",
+                        "code_snippet": "BETA = 20\n",
+                    },
+                ]
+            }
+        }
+
+        prop_res = propose_patch_node(state)
+        bundle_id = prop_res["bundle_patch_id"]
+
+        apply_state = {
+            **prop_res,
+            "approval_status": "approved",
+            "approved_patch_id": bundle_id,
+        }
+
+        apply_res = apply_patch_node(apply_state)
+        assert apply_res["status"] == "applied"
+        assert apply_res["patch_applied"] is True
+        assert len(apply_res["applied_patches"]) == 2
+
+        # Verify disk modifications
+        assert file1.read_text(encoding="utf-8") == "ALPHA = 10\n"
+        assert file2.read_text(encoding="utf-8") == "BETA = 20\n"
+
+    def test_apply_patch_node_multi_file_transactional_rollback_on_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        file1 = tmp_path / "ok.py"
+        file1.write_text("STATUS = 'init'\n", encoding="utf-8")
+        orig1_checksum = compute_content_checksum("STATUS = 'init'\n")
+        patch1_id = create_patch_id("ok.py", "STATUS = 'updated'\n", orig1_checksum)
+
+        # File 2 will cause conflict (simulating concurrent edit on disk)
+        file2 = tmp_path / "conflict.py"
+        file2.write_text("VERSION = 1\n", encoding="utf-8")
+        orig2_checksum = compute_content_checksum("VERSION = 1\n")
+        patch2_id = create_patch_id("conflict.py", "VERSION = 2\n", orig2_checksum)
+
+        # Now simulate disk conflict on file2 before applying
+        file2.write_text("VERSION = 999\n", encoding="utf-8")
+
+        patches = [
+            {
+                "patch_id": patch1_id,
+                "file_path": "ok.py",
+                "proposed_content": "STATUS = 'updated'\n",
+                "expected_original_checksum": orig1_checksum,
+                "proposed_checksum": compute_content_checksum("STATUS = 'updated'\n"),
+            },
+            {
+                "patch_id": patch2_id,
+                "file_path": "conflict.py",
+                "proposed_content": "VERSION = 2\n",
+                "expected_original_checksum": orig2_checksum,
+                "proposed_checksum": compute_content_checksum("VERSION = 2\n"),
+            },
+        ]
+        from app.agent.patch import create_bundle_patch_id
+        bundle_id = create_bundle_patch_id(patches)
+
+        state = {
+            "approval_status": "approved",
+            "approved_patch_id": bundle_id,
+            "bundle_patch_id": bundle_id,
+            "patches": patches,
+            "patch": patches[0],
+        }
+
+        res = apply_patch_node(state)
+        assert res["status"] == "apply_failed"
+        assert not res["patch_applied"]
+        # File 1 must have been rolled back to initial state!
+        assert file1.read_text(encoding="utf-8") == "STATUS = 'init'\n"
+
+    def test_workflow_multi_file_rollback_when_verification_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.agent.patch.PROJECT_ROOT", tmp_path)
+        file1 = tmp_path / "f1.py"
+        file1.write_text("A = 1\n", encoding="utf-8")
+        file2 = tmp_path / "f2.py"
+        file2.write_text("B = 2\n", encoding="utf-8")
+
+        mock_snippets = [{"file_path": "f1.py", "content": "A = 1\n"}]
+        mock_analysis = MagicMock()
+        mock_analysis.status = "success"
+        mock_analysis.errors = []
+        mock_analysis.model_dump.return_value = {
+            "task": "Update both files",
+            "summary": "Multi edit",
+            "evidence": [],
+            "hypotheses": [],
+            "proposed_changes": [
+                {"file_path": "f1.py", "description": "Update A", "code_snippet": "A = 100\n"},
+                {"file_path": "f2.py", "description": "Update B", "code_snippet": "B = 200\n"},
+            ],
+            "status": "success",
+        }
+
+        memory = MemorySaver()
+        graph = build_agent_graph(checkpointer=memory, with_approval_interrupt=True)
+        config = {"configurable": {"thread_id": "session-multi-rollback-test"}}
+
+        with patch("app.agent.nodes.search_code_semantic", return_value=mock_snippets), \
+             patch("app.agent.nodes.analyze_code_task", return_value=mock_analysis), \
+             patch("app.agent.nodes.run_verification_tests", return_value={
+                 "passed": False,
+                 "exit_code": 1,
+                 "output": "FAILED test - multi edit verification failed",
+                 "test_target": "app/tests/",
+             }):
+
+            # 1. Run to approval gate
+            state_at_interrupt = graph.invoke({"task": "Update both files"}, config=config)
+            assert state_at_interrupt["status"] == "awaiting_approval"
+            assert len(state_at_interrupt["patches"]) == 2
+
+            # 2. Approve with bundle ID and max_retries=0 to test immediate rollback
+            bundle_id = state_at_interrupt["bundle_patch_id"]
+            graph.update_state(config, {
+                "approval_status": "approved",
+                "approved_patch_id": bundle_id,
+                "max_retries": 0,
+            })
+            final_state = graph.invoke(None, config=config)
+
+            # 3. Assert verification failed and ALL files rolled back safely
+            assert final_state["status"] == "verification_failed"
+            assert not final_state["patch_applied"]
+            assert file1.read_text(encoding="utf-8") == "A = 1\n"
+            assert file2.read_text(encoding="utf-8") == "B = 2\n"
+

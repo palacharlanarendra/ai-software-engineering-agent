@@ -65,6 +65,8 @@ class TaskStateResponse(BaseModel):
     next_nodes: List[str] = Field(default_factory=list, description="Next nodes scheduled to execute in LangGraph")
     patch_applied: bool = Field(default=False, description="Whether patch has been applied to disk")
     patch: Optional[PatchProposalResponse] = Field(default=None, description="Active patch proposal if any")
+    patches: List[PatchProposalResponse] = Field(default_factory=list, description="All proposed patches across target files")
+    bundle_patch_id: Optional[str] = Field(default=None, description="Aggregate patch bundle ID")
     test_results: Optional[VerificationResultResponse] = Field(default=None, description="Automated test verification results if run")
     retry_count: int = Field(default=0, description="Number of verification retries attempted")
     errors: List[str] = Field(default_factory=list, description="List of recorded error messages")

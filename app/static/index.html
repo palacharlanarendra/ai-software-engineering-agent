@@ -90,6 +90,12 @@
                 </div>
             </div>
 
+            <!-- Multi-file Patch Changeset Selector Bar -->
+            <div class="diff-file-tabs" id="diff-file-tabs" style="display: none;">
+                <span class="diff-tabs-label">📁 MULTI-FILE CHANGESET:</span>
+                <div class="diff-tabs-list" id="diff-tabs-list"></div>
+            </div>
+
             <!-- Monaco Editor Container -->
             <div class="editor-viewport" id="editor-viewport">
                 <div id="monaco-code-container" class="monaco-wrapper"></div>
@@ -157,6 +163,9 @@
                             </button>
                             <button class="pill-btn" data-prompt="In app/tools/repository.py, add a helper function count_repository_files() -> int that returns the count of files.">
                                 📊 + Add File Count Utility
+                            </button>
+                            <button class="pill-btn" data-prompt="Multi-edit task: In app/schemas.py, add PingResponse model with field message: str. In app/main.py, add @app.get('/ping', response_model=PingResponse) returning {'message': 'pong'}.">
+                                🚀 🛠️ Multi-Edit: Schema + Main Route
                             </button>
                         </div>
                     </div>
